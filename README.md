@@ -192,9 +192,18 @@ echo "0 */6 * * * $(pwd)/scripts/block-scanner-ips.sh" | sudo crontab -
 - Blocks IPs hitting exploit paths (WordPress, `.env`, `.git`, PHP shells, etc.)
 - Blocks IPs from geo-blocked countries, **including CDN-proxied traffic** (Cloudflare, etc.)
 - Adds scanner rDNS matches (Censys, Shodan, etc.) to the scanner_nets set
+- **[Optional]** Checks uncategorized IPs against AbuseIPDB and auto-reports malicious activity (requires API key)
 - Persists all changes to disk
 
 Edit `BLOCKED_COUNTRIES`, `MALICIOUS_PATHS`, `SAFE_PATHS`, and `SCANNER_RDNS` at the top of the script to customize.
+
+**AbuseIPDB Integration (Optional):**
+To enable automated threat intelligence checking and reporting, create a free account on [AbuseIPDB](https://www.abuseipdb.com/) and save your API key to `/etc/abuseipdb.key`:
+```bash
+echo "YOUR_API_KEY" | sudo tee /etc/abuseipdb.key
+sudo chmod 600 /etc/abuseipdb.key
+```
+The script will automatically pick it up and use it to block unknown IPs that exceed the threat threshold, as well as report confirmed attackers.
 
 ### Layer 3: nginx path blocking
 
