@@ -4,6 +4,8 @@ Real-time web traffic analysis dashboard with geographic visualization, traffic 
 
 ![Dashboard](https://img.shields.io/badge/stack-HTML%20%2B%20JS-blue) ![License](https://img.shields.io/badge/license-MIT-green)
 
+<video src="demo.webm" controls autoplay loop muted></video>
+
 ## Features
 
 - **Interactive Map** -- Leaflet-based world map with per-session markers color-coded by traffic type, blocked country overlays with "BLOCKED" labels

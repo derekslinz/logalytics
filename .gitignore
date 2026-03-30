@@ -5,3 +5,6 @@ html/data.json
 .DS_Store
 .env
 .vscode
+node_modules
+package-lock.json
+package.json
