@@ -12,8 +12,9 @@ Real-time web traffic analysis dashboard with geographic visualization, traffic 
 - **Notable Organizations** -- Identifies visitors by rDNS and ASN, grouped into cloud providers vs other hosting, with location data and Google search links in the pop-out modal
 - **Country Drill-Down** -- Click any country in the country report modal to expand a full IP table with traffic type, request count, last seen timestamp, and requested paths
 - **Blocked IP Indicators** -- `GEO-BLK` and `IP-BLK` badges throughout the live feed, map popups, and country reports for at-a-glance block verification
-- **Live Feed** -- Scrollable traffic table with full date+time stamps, IP reputation links, and blocked status indicators
+- **Live Feed** -- Scrollable traffic table with full date+time stamps, hot-linked IPs (to IPInfo.io), and blocked status indicators
 - **Playback** -- Timeline scrubber with adjustable speed to replay traffic patterns
+- **Top Scanned Paths** -- Aggregates and displays the exact directories and files that malicious actors and bots are actively probing on your server
 
 ## Quick Start
 
@@ -227,9 +228,11 @@ The script will automatically pick it up and use it to block unknown IPs that ex
 **Scanner Netblocks**:
 We highly recommend keeping the `SCANNER_RDNS` list active. Entities like Shodan, Censys, Internet Measurement, and Shadowserver constantly index the web for open ports and vulnerabilities. Blocking their netblocks prevents your infrastructure details from appearing in public vulnerability databases, which attackers often use for reconnaissance before an attack.
 
-### Layer 3: Web Server Path Blocking
+### Layer 3: Web Server Scanner Tarpit
 
-Blocks well-known exploit paths directly at the web server layer. This catches attacks that proxy through CDNs (like Cloudflare) and bypass IP-level rules.
+Intercepts well-known exploit paths directly at the web server layer. 
+
+Rather than returning a fast `404 Not Found` or `403 Forbidden`, these configurations act as a **tarpit/honeypot**. They return a fake `200 OK - System Access Granted` response containing dummy administrative HTML. This maliciously complies with automated scanners like Nikto, ZMap, and DFind, forcing them to register an endless stream of false-positive vulnerabilities, poisoning their reconnaissance data and wasting their time.
 
 **Nginx**:
 ```nginx

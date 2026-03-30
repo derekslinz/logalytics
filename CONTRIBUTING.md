@@ -1,6 +1,6 @@
-# Contributing to Log Analyzer Pro
+# Contributing to Logalytics
 
-Thank you for your interest in contributing to Log Analyzer Pro! We welcome contributions of all kinds, from bug reports to new features.
+Thank you for your interest in contributing to Logalytics! We welcome contributions of all kinds, from bug reports to new features.
 
 ## How to Contribute
 
