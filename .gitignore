@@ -4,3 +4,4 @@ html/data.json
 *.conf
 .DS_Store
 .env
+.vscode
