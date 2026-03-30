@@ -4,7 +4,8 @@ Real-time web traffic analysis dashboard with geographic visualization, traffic 
 
 ![Dashboard](https://img.shields.io/badge/stack-HTML%20%2B%20JS-blue) ![License](https://img.shields.io/badge/license-MIT-green)
 
-<video src="demo.webm" controls autoplay loop muted></video>
+[demo.webm](https://github.com/user-attachments/assets/9e235495-7077-47c1-bbcc-d96e253cc416)
+
 
 ## Features
 
