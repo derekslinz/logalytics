@@ -56,6 +56,7 @@ MALICIOUS_PATHS = [
     r'/swagger\.json', r'/api/v\d+/config', r'/api/v\d+/\.env',
     r'/evox/', r'/nmaplowercheck',
     r'/developmentserver/', r'/luci/',
+    r'/phpmyadmin', r'/pma/', r'/xampp/', r'/_vti_bin/', r'/manager/html', r'/muieblackcat',
     r'\.php$',
 ]
 SAFE_PATHS = [r'/send_mail\.php', r'/favicon', r'/robots\.txt', r'/sitemap\.xml']

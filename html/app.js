@@ -185,6 +185,7 @@ function updateDashboard() {
     updateChartsData();
     updateLogFeed();
     updateCountryReport();
+    updateTopPaths();
 }
 
 function updateMarkers() {
@@ -571,6 +572,43 @@ function updateCountryReport() {
             </div>
         </div>`;
     }).join('');
+}
+
+function updateTopPaths() {
+    const tableDiv = document.getElementById('top-paths');
+    if (!tableDiv) return;
+
+    const pathCounts = {};
+    filteredSessions.forEach(s => {
+        const ttype = getTrafficType(s);
+        // Look at paths hit by malicious actors or suspected scanner bots
+        if (ttype === 'malicious' || ttype === 'bot' || isScannerTraffic(s)) {
+            (s.path_summary || []).forEach(p => {
+                pathCounts[p] = (pathCounts[p] || 0) + s.req_count;
+            });
+        }
+    });
+
+    const entries = Object.entries(pathCounts)
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 50);
+
+    let html = '<table style="width: 100%; border-collapse: collapse;">';
+    entries.forEach(([path, count]) => {
+        html += `
+            <tr style="border-bottom: 1px solid rgba(255,255,255,0.05);">
+                <td title="${path}" style="padding: 4px 0; font-size: 0.75rem; word-break: break-all; color: var(--text-primary); max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${path}</td>
+                <td style="padding: 4px 0; font-size: 0.75rem; text-align: right; color: var(--accent-color); font-weight: 500;">${count}</td>
+            </tr>
+        `;
+    });
+    html += '</table>';
+    
+    if (entries.length === 0) {
+        html = '<div style="font-size: 0.75rem; color: var(--text-secondary); text-align: center; padding: 1rem 0;">No scanner paths found</div>';
+    }
+    
+    tableDiv.innerHTML = html;
 }
 
 function setupEvents() {

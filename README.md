@@ -205,6 +205,28 @@ sudo chmod 600 /etc/abuseipdb.key
 ```
 The script will automatically pick it up and use it to block unknown IPs that exceed the threat threshold, as well as report confirmed attackers.
 
+### Recommended Blocking Practices
+
+> [!WARNING]
+> Every website has unique audience requirements. The following are generic recommendations based on broad threat intelligence, but you MUST evaluate them against your own legitimate user base before applying blocks. Blanket blocking countries can prevent legitimate users, SEO crawlers, or partner APIs from reaching your site.
+
+**Top 10 Typical Sources of Malicious Traffic (to consider for `BLOCKED_COUNTRIES`)**:
+1. China (`CN`)
+2. Russia (`RU`)
+3. Brazil (`BR`)
+4. India (`IN`)
+5. Vietnam (`VN`)
+6. Iran (`IR`)
+7. Indonesia (`ID`)
+8. Philippines (`PH`)
+9. Nigeria (`NG`)
+10. North Korea (`KP`)
+
+*(Note: The United States and various European countries also generate massive amounts of malicious traffic, but are generally excluded from blanket blocks due to the high volume of legitimate traffic and search engine bots originating there.)*
+
+**Scanner Netblocks**:
+We highly recommend keeping the `SCANNER_RDNS` list active. Entities like Shodan, Censys, Internet Measurement, and Shadowserver constantly index the web for open ports and vulnerabilities. Blocking their netblocks prevents your infrastructure details from appearing in public vulnerability databases, which attackers often use for reconnaissance before an attack.
+
 ### Layer 3: Web Server Path Blocking
 
 Blocks well-known exploit paths directly at the web server layer. This catches attacks that proxy through CDNs (like Cloudflare) and bypass IP-level rules.
