@@ -6,7 +6,9 @@ let statusChart, volumeChart, typeChart;
 let currentFilter = 'all';
 let isPlaying = false;
 let playInterval;
-const BLOCKED_COUNTRIES = ['RU', 'BY', 'KZ', 'BR', 'IN', 'CN', 'PH', 'ID', 'IR', 'KP', 'VN', 'NG'];
+const BLOCKED_COUNTRIES = (window.APP_CONFIG && window.APP_CONFIG.BLOCKED_COUNTRIES) 
+    ? window.APP_CONFIG.BLOCKED_COUNTRIES 
+    : ['RU', 'BY', 'KZ', 'BR', 'IN', 'CN', 'PH', 'ID', 'IR', 'KP', 'VN', 'NG'];
 
 async function init() {
     if (typeof ChartDataLabels !== 'undefined') {

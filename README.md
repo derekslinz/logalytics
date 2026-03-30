@@ -195,7 +195,7 @@ echo "0 */6 * * * $(pwd)/scripts/block-scanner-ips.sh" | sudo crontab -
 - **[Optional]** Checks uncategorized IPs against AbuseIPDB and auto-reports malicious activity (requires API key)
 - Persists all changes to disk
 
-Edit `BLOCKED_COUNTRIES`, `MALICIOUS_PATHS`, `SAFE_PATHS`, and `SCANNER_RDNS` at the top of the script to customize.
+Edit `BLOCKED_COUNTRIES`, `ABUSE_SCORE_THRESHOLD`, `ABUSE_REPORT_THRESHOLD`, `MALICIOUS_PATHS`, and `SCANNER_RDNS` at the top of the script (or override via environment variables) to customize parsing.
 
 **AbuseIPDB Integration (Optional):**
 To enable automated threat intelligence checking and reporting, create a free account on [AbuseIPDB](https://www.abuseipdb.com/) and save your API key to `/etc/abuseipdb.key`:
@@ -205,14 +205,70 @@ sudo chmod 600 /etc/abuseipdb.key
 ```
 The script will automatically pick it up and use it to block unknown IPs that exceed the threat threshold, as well as report confirmed attackers.
 
-### Layer 3: nginx path blocking
+### Layer 3: Web Server Path Blocking
 
+Blocks well-known exploit paths directly at the web server layer. This catches attacks that proxy through CDNs (like Cloudflare) and bypass IP-level rules.
+
+**Nginx**:
 ```nginx
 # Add to your nginx server block
 include /path/to/scripts/nginx-exploit-paths.conf;
 ```
 
-Returns 403 for all known exploit paths. This catches attacks that bypass IP-level rules (e.g. traffic proxied through Cloudflare WARP).
+**Apache**:
+```apache
+# Add to your Apache VirtualHost
+Include /path/to/scripts/apache-exploit-paths.conf
+```
+*(Requires `mod_rewrite` to be enabled: `sudo a2enmod rewrite`)*
+
+## Secure Deployment Example
+
+Because this dashboard visually exposes internal IP data and paths, you should **never** deploy it publicly without authentication.
+
+### Nginx Example (Basic Auth + IP Whitelist)
+```nginx
+server {
+    listen 80;
+    server_name logs.yourdomain.com;
+    root /var/www/log-analyzer/html;
+    index index.html;
+
+    # Restrict to your office/VPN IPs
+    allow 192.168.1.0/24;
+    allow 10.0.0.0/8;
+    deny all;
+
+    # Require password
+    auth_basic "Log Analyzer Admin";
+    auth_basic_user_file /etc/nginx/.htpasswd;
+
+    # Prevent direct access to raw data.json (optional, but UI needs it)
+    # The UI fetches via JS, so basic auth handles the protection.
+    
+    # Enable GZIP for fast loading of data.json
+    gzip on;
+    gzip_types application/json;
+}
+```
+
+### Apache Example (Basic Auth)
+```apache
+<VirtualHost *:80>
+    ServerName logs.yourdomain.com
+    DocumentRoot /var/www/log-analyzer/html
+
+    <Directory /var/www/log-analyzer/html>
+        AuthType Basic
+        AuthName "Log Analyzer Admin"
+        AuthUserFile /etc/apache2/.htpasswd
+        Require valid-user
+        
+        # Or restrict by IP
+        # Require ip 192.168.1.0/24 10.0.0.0/8
+    </Directory>
+</VirtualHost>
+```
 
 ## Generating data.json
 

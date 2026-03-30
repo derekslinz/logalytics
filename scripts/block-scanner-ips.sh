@@ -13,6 +13,21 @@ PERSIST_SCANNERS="${PERSIST_SCANNERS:-/etc/ipset-scanners.conf}"
 LOG="${LOG:-/var/log/block-scanner-ips.log}"
 ABUSEIPDB_KEY_FILE="${ABUSEIPDB_KEY_FILE:-/etc/abuseipdb.key}"
 ABUSEIPDB_LOG="${ABUSEIPDB_LOG:-/var/log/abuseipdb-reports.log}"
+CONFIG_JS="${CONFIG_JS:-$SCRIPT_DIR/../html/config.js}"
+
+
+# Configurables via environment
+export ABUSE_SCORE_THRESHOLD="${ABUSE_SCORE_THRESHOLD:-75}"
+export ABUSE_REPORT_THRESHOLD="${ABUSE_REPORT_THRESHOLD:-10}"
+export BLOCKED_COUNTRIES="${BLOCKED_COUNTRIES:-RU BY KZ BR IN CN PH ID IR KP VN NG}"
+
+# Generate frontend config so UI stays in sync with backend blocklist
+cat <<EOF > "$CONFIG_JS"
+window.APP_CONFIG = {
+    "BLOCKED_COUNTRIES": $(echo "[\"${BLOCKED_COUNTRIES// /\",\"}\"]")
+};
+EOF
+
 
 [ -f "$DATA_JSON" ] || { echo "$(date -Iseconds) ERROR: $DATA_JSON not found" >> "$LOG"; exit 1; }
 
@@ -27,10 +42,11 @@ import urllib.request, urllib.parse
 
 data_path, ipset_abusive, ipset_scanners = sys.argv[1], sys.argv[2], sys.argv[3]
 
-# AbuseIPDB key (optional, passed via env)
+# Configuration from environment
 ABUSEIPDB_KEY = os.environ.get('ABUSEIPDB_KEY', '')
-ABUSE_SCORE_THRESHOLD = 75   # minimum abuse confidence score (%)
-ABUSE_REPORT_THRESHOLD = 10  # minimum number of reports from distinct users
+ABUSE_SCORE_THRESHOLD = int(os.environ.get('ABUSE_SCORE_THRESHOLD', 75))
+ABUSE_REPORT_THRESHOLD = int(os.environ.get('ABUSE_REPORT_THRESHOLD', 10))
+
 
 MALICIOUS_PATHS = [
     r'/wp-admin', r'/wp-login', r'/wp-content', r'/wp-json', r'/wp-config', r'/xmlrpc\.php',
@@ -47,7 +63,7 @@ SAFE_PATHS = [r'/send_mail\.php', r'/favicon', r'/robots\.txt', r'/sitemap\.xml'
 SCANNER_RDNS = ['censys-scanner.com', 'internet-measurement.com', 'shodan.io',
                 'shadowserver.org', 'stretchoid.com', 'binaryedge.ninja']
 
-BLOCKED_COUNTRIES = {'RU','BY','KZ','BR','IN','CN','PH','ID','IR','KP','VN','NG'}
+BLOCKED_COUNTRIES = set(os.environ.get('BLOCKED_COUNTRIES', '').split())
 
 patterns = [re.compile(p, re.IGNORECASE) for p in MALICIOUS_PATHS]
 safe_patterns = [re.compile(p, re.IGNORECASE) for p in SAFE_PATHS]
