@@ -39,12 +39,18 @@ cp html/data.sample.json html/data.json
 
 ```
 html/
-  index.html          # Dashboard shell, modals, Leaflet/Chart.js setup
-  app.js              # All application logic
-  styles.css          # Dark theme styles
-  countries.geojson   # World borders for blocked country overlay
-  data.json           # Session data (gitignored, you provide this)
-  data.sample.json    # Example data with RFC 5737 documentation IPs
+  index.html              # Dashboard shell, modals, Leaflet/Chart.js setup
+  app.js                  # All application logic
+  styles.css              # Dark theme styles
+  countries.geojson       # World borders for blocked country overlay
+  data.json               # Session data (gitignored, you provide this)
+  data.sample.json        # Example data with RFC 5737 documentation IPs
+
+scripts/
+  block-scanner-ips.sh    # Cron job: extract malicious IPs from data.json → ipset
+  setup-ipsets.sh         # One-time: create ipsets + iptables rules
+  load-country-blocks.sh  # Download country CIDR ranges from ipdeny.com → ipset
+  nginx-exploit-paths.conf # nginx snippet: 403 on exploit paths (WordPress, .env, etc.)
 ```
 
 Zero backend dependencies. The dashboard is a static site that reads a single JSON file.
@@ -155,14 +161,49 @@ These appear in the live feed, map popups, and country detail tables. Useful for
 
 ## Integration with IP Blocking
 
-The dashboard is designed to work alongside server-side IP blocking. A companion script (`block-scanner-ips.sh`) can consume `data.json` to automatically:
+The `scripts/` directory contains everything needed to enforce blocking at the server level. The system uses three layers:
 
-1. Add malicious IPs to an `abusive_ips` ipset
-2. Add scanner network ranges to a `scanner_nets` ipset
-3. Block IPs from geo-blocked countries (including CDN-proxied traffic)
-4. Persist rules across reboots
+### Layer 1: Firewall (ipset + iptables)
 
-See the companion blocking script for implementation details.
+```bash
+# One-time setup: create ipsets and iptables rules
+sudo ./scripts/setup-ipsets.sh
+
+# Load country CIDR blocks (downloads from ipdeny.com)
+sudo ./scripts/load-country-blocks.sh ru by kz ir kp cn in br ph id vn ng
+```
+
+This creates three ipsets:
+
+| ipset | Type | Purpose |
+|-------|------|---------|
+| `abusive_ips` | hash:ip | Individual malicious IPs and CDN-proxied IPs from blocked countries |
+| `scanner_nets` | hash:net | Censys, Shodan, internet-measurement CIDR ranges |
+| `blocked_countries` | hash:net | Country-level CIDR blocks |
+
+### Layer 2: Automated IP extraction (cron)
+
+```bash
+# Add to crontab (runs every 6 hours)
+echo "0 */6 * * * /path/to/scripts/block-scanner-ips.sh" | sudo crontab -
+```
+
+`block-scanner-ips.sh` reads `data.json` and:
+- Blocks IPs hitting exploit paths (WordPress, `.env`, `.git`, PHP shells, etc.)
+- Blocks IPs from geo-blocked countries, **including CDN-proxied traffic** (Cloudflare, etc.)
+- Adds scanner rDNS matches (Censys, Shodan, etc.) to the scanner_nets set
+- Persists all changes to disk
+
+Edit `BLOCKED_COUNTRIES`, `MALICIOUS_PATHS`, `SAFE_PATHS`, and `SCANNER_RDNS` at the top of the script to customize.
+
+### Layer 3: nginx path blocking
+
+```nginx
+# Add to your nginx server block
+include /path/to/scripts/nginx-exploit-paths.conf;
+```
+
+Returns 403 for all known exploit paths. This catches attacks that bypass IP-level rules (e.g. traffic proxied through Cloudflare WARP).
 
 ## Generating data.json
 
