@@ -53,7 +53,7 @@ CENSUS_BOT_PATTERN = re.compile(
 )
 
 MALICIOUS_PATHS_FALLBACK = re.compile(
-    r'(\.php|wp-admin|wp-login|xmlrpc|\.env|\.git|\.config|admin|backup|shell|cgi-bin|wp/v2/users|server-status|login\.action|login\.do|\.jsp|\.asp|\.aws/|\.ssh/|\.kube/)',
+    r'(\.php|wp-admin|wp-login|xml-?rpc|\.env|\.git|\.config|admin|backup|shell|cgi-bin|wp/v2/users|server-status|login\.action|login\.do|\.jsp|\.asp|\.aws/|\.ssh/|\.kube/)',
     re.IGNORECASE
 )
 
@@ -151,7 +151,7 @@ import html
 
 # Pattern Clustering for "Level 2 Telemetry"
 PATTERN_GROUPS = [
-    (re.compile(r'(wp-admin|wp-login|xmlrpc|wp-content|wp-includes|wp-config|wordpress)', re.IGNORECASE), "WordPress Scanner"),
+    (re.compile(r'(wp-admin|wp-login|xml-?rpc|wp-content|wp-includes|wp-config|wordpress)', re.IGNORECASE), "WordPress Scanner"),
     (re.compile(r'(\.env|\.git|\.config|config\.php|web\.config|\.php\.)', re.IGNORECASE), "Config/Env Scanner"),
     (re.compile(r'(cgi-bin|bin/sh|cmd\.exe|\.asp|\.jsp|shell)', re.IGNORECASE), "RCE/Shell Probe"),
     (re.compile(r'(\.sql|\.db|\.sqlite|phpmyadmin|adminer)', re.IGNORECASE), "Database Probe"),

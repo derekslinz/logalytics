@@ -51,7 +51,7 @@ ABUSE_REPORT_THRESHOLD = int(os.environ.get('ABUSE_REPORT_THRESHOLD', 10))
 
 
 MALICIOUS_PATHS = [
-    r'/wp-admin', r'/wp-login', r'/wp-content', r'/wp-json', r'/wp-config', r'/xmlrpc\.php',
+    r'/wp-admin', r'/wp-login', r'/wp-content', r'/wp-json', r'/wp-config', r'/xml-?rpc',
     r'/wordpress/', r'/\.env', r'/\.git/', r'/\.streamlit/',
     r'/cgi-bin/', r'/HNAP', r'/SDK/', r'/sdk$',
     r'/admin\.php', r'/login$', r'/admin$', r'/dashboard$', r'/hudson$', r'/user$',
@@ -195,7 +195,9 @@ try:
                 block_history = loaded
 
     blocked_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace('+00:00', 'Z')
-    for ip in sorted(new_abusive):
+    # Record metadata for currently detected blocked IPs so reasons are available
+    # even for IPs that were already present in ipset before this script version.
+    for ip in sorted(block_ips):
         reason_info = block_reasons.get(ip, {'reason': 'unknown', 'evidence': []})
         existing_entry = block_history.get(ip)
 
