@@ -42,7 +42,12 @@ MAX_OUTPUT_SESSIONS = int(os.environ.get('LOG_ANALYZER_MAX_SESSIONS', '0') or '0
 
 # Fallback Regex Patterns
 BOT_PATTERN_FALLBACK = re.compile(
-    r'(bot|crawler|spider|slurp|facebookexternalhit|ia_archiver|bingbot|googlebot|yandex|baidu|duckduckgo|uptime|monitoring|pingdom|semrush|ahrefs|rogerbot|exabot|dotbot|mj12bot|grapeshot|meanpathbot|adsbot-google|mediapartners-google|chrome-lighthouse|lighthouse|letsencrypt|validation server|censys|l9scan|dataprovider|zgrab|masscan|nmap|curl|python-requests|httpx|go-http-client|onyphe|cnsat)',
+    r'(bot|crawler|spider|slurp|facebookexternalhit|ia_archiver|bingbot|googlebot|yandex|baidu|duckduckgo|uptime|monitoring|pingdom|semrush|ahrefs|rogerbot|exabot|dotbot|mj12bot|grapeshot|meanpathbot|adsbot-google|mediapartners-google|chrome-lighthouse|lighthouse|letsencrypt|validation server|dataprovider|curl|python-requests|httpx|go-http-client)',
+    re.IGNORECASE
+)
+
+CENSUS_BOT_PATTERN = re.compile(
+    r'(censys|l9scan|zgrab|masscan|nmap|onyphe|cnsat|shadowserver|shodan|stretchoid|binaryedge|rapid7|leakix|fofa|internet-measurement|project25499|expanseinc|criminalip|zoomseye|netmap|bitping|intrinsec|securitytrails|panthera)',
     re.IGNORECASE
 )
 
@@ -294,7 +299,8 @@ def analyze():
                         asn_num, asn_name = get_asn(origin_ip, asn_reader)
                         hostname = ip_cache[origin_ip].get('hostname') if origin_ip in ip_cache else get_hostname(origin_ip)
                         is_verified_bot = verify_bot(origin_ip, hostname)
-                        is_bot = is_verified_bot or any(r.search(data['agent']) for r in bot_regexes)
+                        is_bot = is_verified_bot or any(r.search(data['agent']) for r in bot_regexes) or \
+                                 bool(BOT_PATTERN_FALLBACK.search(data['agent']))
                         
                         combined = ((hostname or "") + (asn_name or "")).lower()
                         is_hosting = any(k in combined for k in HOSTING_PATTERN.pattern.split('|')) or (asn_num in HOSTING_ASNS)
@@ -363,14 +369,22 @@ def analyze():
                     if c_code not in country_ips:
                         country_ips[c_code] = { 'legit': set(), 'bots': set(), 'malicious': set(), 'name': ip_cache[origin_ip]['country'] or 'Unknown' }
                     
+                    is_census_bot = bool(CENSUS_BOT_PATTERN.search(data['agent'])) or \
+                                    bool(CENSUS_BOT_PATTERN.search(ip_cache[origin_ip]['hostname'] or ''))
+
                     is_malicious = (status >= 400 and not ip_cache[origin_ip]['is_bot']) or \
                                   (path in malicious_paths_list) or \
                                   bool(MALICIOUS_PATHS_FALLBACK.search(path)) or \
-                                  (c_code in ['RU', 'BY'])
+                                  (c_code in ['RU', 'BY']) or \
+                                  is_census_bot
                     
                     if is_malicious: 
                         country_ips[c_code]['malicious'].add(origin_ip)
                         s['is_malicious'] = True
+                        if is_census_bot:
+                            s['intent'] = "Census Scanner"
+                            if "internet census" not in s['tags']:
+                                s['tags'].append("internet census")
                     elif ip_cache[origin_ip]['is_bot']: country_ips[c_code]['bots'].add(origin_ip)
                     else: country_ips[c_code]['legit'].add(origin_ip)
 

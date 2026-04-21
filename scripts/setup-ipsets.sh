@@ -38,6 +38,12 @@ for net in 71.6.146.0/24 71.6.147.0/24 71.6.158.0/24 71.6.165.0/24 \
     ipset add scanner_nets "$net" 2>/dev/null || true
 done
 
+# Shadowserver
+for net in 184.105.139.0/24 184.105.247.0/24 216.218.206.0/24 74.82.47.0/24 \
+           204.42.253.0/24 204.42.254.0/24 212.102.45.0/24; do
+    ipset add scanner_nets "$net" 2>/dev/null || true
+done
+
 # Internet-measurement (RWTH Aachen)
 ipset add scanner_nets 87.236.176.0/24 2>/dev/null || true
 
@@ -71,4 +77,3 @@ echo "Next steps:"
 echo "  1. Populate blocked_countries with country CIDR ranges (see load-country-blocks.sh)"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 echo "  2. Add cron job: 0 */6 * * * $SCRIPT_DIR/block-scanner-ips.sh"
-

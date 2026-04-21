@@ -166,34 +166,70 @@ function setupCharts() {
         type: 'bar',
         data: {
             labels: [],
-            datasets: [{
-                label: 'Requests',
-                data: [],
-                backgroundColor: 'rgba(0, 242, 255, 0.4)',
-                borderColor: '#00f2ff',
-                borderWidth: 1
-            }]
+            datasets: [
+                {
+                    type: 'bar',
+                    label: 'Requests',
+                    data: [],
+                    yAxisID: 'yRequests',
+                    backgroundColor: 'rgba(0, 242, 255, 0.35)',
+                    borderColor: '#00f2ff',
+                    borderWidth: 1
+                },
+                {
+                    type: 'line',
+                    label: 'Unique IPs',
+                    data: [],
+                    yAxisID: 'yIps',
+                    borderColor: '#a855f7',
+                    backgroundColor: 'rgba(168, 85, 247, 0.2)',
+                    borderWidth: 2,
+                    pointRadius: 2,
+                    pointHoverRadius: 4,
+                    tension: 0.3
+                }
+            ]
         },
         options: {
             responsive: true,
             maintainAspectRatio: false,
             plugins: {
-                legend: { display: false },
+                legend: {
+                    display: true,
+                    labels: {
+                        color: '#94a3b8',
+                        boxWidth: 10,
+                        usePointStyle: true
+                    }
+                },
                 datalabels: { display: false },
                 tooltip: {
                     callbacks: {
-                        label: (ctx) => `Requests: ${ctx.parsed.y.toLocaleString()}`
+                        label: (ctx) => `${ctx.dataset.label}: ${Number(ctx.parsed.y || 0).toLocaleString()}`
                     }
                 }
             },
             scales: {
                 x: {
-                    display: false,
-                    grid: { display: false }
+                    display: true,
+                    grid: { color: 'rgba(255, 255, 255, 0.05)', drawBorder: false },
+                    ticks: {
+                        color: '#94a3b8',
+                        maxTicksLimit: 8,
+                        autoSkip: true,
+                        maxRotation: 0
+                    },
+                    title: {
+                        display: true,
+                        text: 'Time',
+                        color: '#94a3b8',
+                        font: { size: 10, weight: '600' }
+                    }
                 },
-                y: {
+                yRequests: {
                     display: true,
                     beginAtZero: true,
+                    position: 'left',
                     ticks: {
                         color: '#94a3b8',
                         maxTicksLimit: 4,
@@ -209,9 +245,48 @@ function setupCharts() {
                         color: 'rgba(255, 255, 255, 0.08)',
                         drawBorder: false
                     }
+                },
+                yIps: {
+                    display: true,
+                    beginAtZero: true,
+                    position: 'right',
+                    ticks: {
+                        color: '#b794f4',
+                        maxTicksLimit: 4,
+                        callback: (value) => Number(value).toLocaleString()
+                    },
+                    title: {
+                        display: true,
+                        text: 'Unique IPs',
+                        color: '#b794f4',
+                        font: { size: 10, weight: '600' }
+                    },
+                    grid: {
+                        drawOnChartArea: false,
+                        drawBorder: false
+                    }
                 }
             }
         }
+    });
+}
+
+function sessionMatchesCurrentFilter(s) {
+    if (currentFilter === 'legitimate') return !s.geo.is_bot && !s.is_malicious && !s.geo.is_cloud && !s.geo.is_hosting;
+    if (currentFilter === 'cloud') return s.geo.is_cloud && !s.is_bot && !s.is_malicious;
+    if (currentFilter === 'hosting') return s.geo.is_hosting && !s.is_bot && !s.is_malicious;
+    if (currentFilter === 'bots') return s.geo.is_bot;
+    if (currentFilter === 'malicious') return s.is_malicious;
+    return true;
+}
+
+function formatBucketLabel(ts) {
+    if (!ts || !Number.isFinite(ts)) return '';
+    return new Date(ts).toLocaleString('en-US', {
+        month: 'short',
+        day: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit'
     });
 }
 
@@ -222,14 +297,7 @@ function updateDashboard() {
     
     const maxIdx = Math.floor((total - 1) * (sliderVal / 100));
     
-    filteredSessions = allSessions.slice(0, maxIdx + 1).filter(s => {
-        if (currentFilter === 'legitimate') return !s.geo.is_bot && !s.is_malicious && !s.geo.is_cloud && !s.geo.is_hosting;
-        if (currentFilter === 'cloud') return s.geo.is_cloud && !s.is_bot && !s.is_malicious;
-        if (currentFilter === 'hosting') return s.geo.is_hosting && !s.is_bot && !s.is_malicious;
-        if (currentFilter === 'bots') return s.geo.is_bot;
-        if (currentFilter === 'malicious') return s.is_malicious;
-        return true;
-    });
+    filteredSessions = allSessions.slice(0, maxIdx + 1).filter(sessionMatchesCurrentFilter);
 
     document.getElementById('total-req').innerText = filteredSessions.reduce((acc, s) => acc + s.req_count, 0).toLocaleString();
     const uniqueIPs = new Set(filteredSessions.map(s => s.origin_ip)).size;
@@ -246,7 +314,7 @@ function updateDashboard() {
     }
 
     updateMarkers();
-    updateChartsData();
+    updateChartsData(maxIdx);
     updateLogFeed();
     updateCountryReport();
     updateTopPaths();
@@ -287,7 +355,7 @@ function updateMarkers() {
     });
 }
 
-function updateChartsData() {
+function updateChartsData(maxIdx) {
     const legit = filteredSessions.filter(s => !s.geo.is_bot && !s.is_malicious && !s.geo.is_cloud && !s.geo.is_hosting).length;
     const cloud = filteredSessions.filter(s => s.geo.is_cloud && !s.geo.is_bot && !s.geo.is_malicious).length;
     const hosting = filteredSessions.filter(s => s.geo.is_hosting && !s.geo.is_bot && !s.geo.is_malicious).length;
@@ -320,14 +388,32 @@ function updateChartsData() {
     statusChart.data.datasets[0].data = statusTotals;
     statusChart.update();
 
-    const volumeData = new Array(30).fill(0);
-    const bucketSize = Math.max(1, Math.floor(allSessions.length / 30));
-    filteredSessions.forEach((s, i) => {
-        const bucketIdx = Math.floor(i / bucketSize);
-        if (bucketIdx < 30) volumeData[bucketIdx] += s.req_count;
-    });
-    volumeChart.data.labels = volumeData.map((_, i) => i);
-    volumeChart.data.datasets[0].data = volumeData;
+    const totalInWindow = Math.max(1, (typeof maxIdx === 'number' ? maxIdx + 1 : allSessions.length));
+    const bucketCount = Math.max(1, Math.min(30, totalInWindow));
+    const bucketSize = Math.max(1, Math.ceil(totalInWindow / bucketCount));
+    const requestData = new Array(bucketCount).fill(0);
+    const ipSets = Array.from({ length: bucketCount }, () => new Set());
+    const bucketTimeRanges = Array.from({ length: bucketCount }, () => ({ start: 0, end: 0 }));
+
+    for (let i = 0; i < totalInWindow; i++) {
+        const s = allSessions[i];
+        const bucketIdx = Math.min(bucketCount - 1, Math.floor(i / bucketSize));
+        const ts = getSessionTimestamp(s, 'last');
+
+        if (!bucketTimeRanges[bucketIdx].start || ts < bucketTimeRanges[bucketIdx].start) bucketTimeRanges[bucketIdx].start = ts;
+        if (ts > bucketTimeRanges[bucketIdx].end) bucketTimeRanges[bucketIdx].end = ts;
+
+        if (!sessionMatchesCurrentFilter(s)) continue;
+        requestData[bucketIdx] += Number(s.req_count || 0);
+        ipSets[bucketIdx].add(s.origin_ip);
+    }
+
+    const ipLineData = ipSets.map(set => set.size);
+    const labels = bucketTimeRanges.map(range => formatBucketLabel(range.end || range.start));
+
+    volumeChart.data.labels = labels;
+    volumeChart.data.datasets[0].data = requestData;
+    volumeChart.data.datasets[1].data = ipLineData;
     volumeChart.update();
 }
 
@@ -546,22 +632,39 @@ function renderIpDetailTable(ipList) {
 
 function attachDrillDown(container) {
     container.querySelectorAll('.notable-row').forEach(row => {
-        row.addEventListener('click', (e) => {
-            if (e.target.closest('a')) return;
-            const detail = row.querySelector('.notable-detail');
-            if (detail.style.display !== 'none') {
-                detail.style.display = 'none';
-                return;
-            }
-            const ips = row.dataset.ips.split(',').filter(Boolean);
+        const detail = row.querySelector('.notable-detail');
+        const ips = row.dataset.ips.split(',').filter(Boolean);
+
+        const expand = () => {
+            if (!detail) return;
             detail.innerHTML = renderIpDetailTable(ips);
             detail.style.display = 'block';
+        };
+
+        // Expanded by default so selecting/copying doesn't collapse the detail panel.
+        expand();
+
+        row.addEventListener('click', (e) => {
+            if (e.target.closest('a')) return;
+
+            // Ignore clicks that are part of text selection/copy interactions.
+            const selectedText = window.getSelection ? window.getSelection().toString() : '';
+            if (selectedText && selectedText.trim().length > 0) return;
+
+            // Keep expanded by default; only re-open if something hid it.
+            if (detail && detail.style.display === 'none') {
+                expand();
+            }
         });
     });
 }
 
 function renderSectionHeader(label, count, color) {
     return `<div style="font-size: 0.65rem; text-transform: uppercase; letter-spacing: 0.05em; color: ${color}; margin: 0.5rem 0; font-weight: 600;">${label} (${count})</div>`;
+}
+
+function sortNotablesByCount(items) {
+    return [...items].sort((a, b) => (b.count || 0) - (a.count || 0));
 }
 
 function updateNotableDomains(notable) {
@@ -710,10 +813,12 @@ function setupEvents() {
     document.getElementById('btn-play').addEventListener('click', togglePlay);
     const livePanel = document.getElementById('live-panel');
     const edgeToggle = document.getElementById('toggle-feed-edge');
+    const centerPane = document.querySelector('.center-pane');
     const setLivePanelOpen = (open) => {
         if (!livePanel) return;
         livePanel.classList.toggle('open', open);
         if (edgeToggle) edgeToggle.classList.toggle('hidden', open);
+        if (centerPane) centerPane.classList.toggle('with-live-panel-open', open);
         refreshResizableLayout();
     };
 
@@ -728,18 +833,21 @@ function setupEvents() {
         const modal = document.getElementById('notable-modal');
         const body = document.getElementById('notable-modal-body');
         const { rdns, cloud, otherHosting } = categorizeNotable(allNotable);
+        const sortedRdns = sortNotablesByCount(rdns);
+        const sortedCloud = sortNotablesByCount(cloud);
+        const sortedOtherHosting = sortNotablesByCount(otherHosting);
         let html = '';
-        if (rdns.length) {
-            html += `<div style="font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.05em; color: var(--accent-color); margin: 1rem 0 0.75rem; font-weight: 700;">rDNS-Based (${rdns.length})</div>`;
-            html += renderNotableList(rdns);
+        if (sortedRdns.length) {
+            html += `<div style="font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.05em; color: var(--accent-color); margin: 1rem 0 0.75rem; font-weight: 700;">rDNS-Based (${sortedRdns.length})</div>`;
+            html += renderNotableList(sortedRdns);
         }
-        if (cloud.length) {
-            html += `<div style="font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.05em; color: #a855f7; margin: 1rem 0 0.75rem; font-weight: 700;">Cloud Providers (${cloud.length})</div>`;
-            html += renderNotableList(cloud);
+        if (sortedCloud.length) {
+            html += `<div style="font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.05em; color: #a855f7; margin: 1rem 0 0.75rem; font-weight: 700;">Cloud Providers (${sortedCloud.length})</div>`;
+            html += renderNotableList(sortedCloud);
         }
-        if (otherHosting.length) {
-            html += `<div style="font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.05em; color: #22c55e; margin: 1rem 0 0.75rem; font-weight: 700;">Other Hosting (${otherHosting.length})</div>`;
-            html += renderNotableList(otherHosting);
+        if (sortedOtherHosting.length) {
+            html += `<div style="font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.05em; color: #22c55e; margin: 1rem 0 0.75rem; font-weight: 700;">Other Hosting (${sortedOtherHosting.length})</div>`;
+            html += renderNotableList(sortedOtherHosting);
         }
         body.innerHTML = html;
         attachDrillDown(body);

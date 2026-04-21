@@ -61,8 +61,15 @@ MALICIOUS_PATHS = [
 ]
 SAFE_PATHS = [r'/send_mail\.php', r'/favicon', r'/robots\.txt', r'/sitemap\.xml']
 
-SCANNER_RDNS = ['censys-scanner.com', 'internet-measurement.com', 'shodan.io',
-                'shadowserver.org', 'stretchoid.com', 'binaryedge.ninja']
+SCANNER_RDNS = [
+    'censys-scanner.com', 'internet-measurement.com', 'shodan.io', 'shodan.net',
+    'shadowserver.org', 'stretchoid.com', 'binaryedge.ninja', 'onyphe.io',
+    'leakix.net', 'rapid7.com', 'syscan.org', 'binalyze.com', 'netsystemsresearch.com',
+    'project25499.com', 'expanseinc.com', 'criminalip.com', 'zoomseye.org',
+    'netmap.io', 'rwth-aachen.de', 'hurricanethreat.com', 'bitping.com',
+    'intrinsec.com', 'securitytrails.com', 'panthera.network', 'leakix.com',
+    'fofa.info', 'fofa.so'
+]
 
 BLOCKED_COUNTRIES = set(os.environ.get('BLOCKED_COUNTRIES', '').split())
 
