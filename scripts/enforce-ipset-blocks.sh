@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-# block-scanner-ips.sh — Extract malicious IPs from Logalytics data and add to ipset
+# enforce-ipset-blocks.sh — Enforce IP-based blocks via ipset, based on Logalytics analysis
+# Extracts scanner IPs, malicious IPs, and country-blocked IPs from data.json
+# Adds IPs to ipsets, logs iptables events, and reports to AbuseIPDB
 # Runs as cron job after data.json is refreshed
 
 set -euo pipefail
@@ -10,7 +12,7 @@ IPSET_ABUSIVE="${IPSET_ABUSIVE:-abusive_ips}"
 IPSET_SCANNERS="${IPSET_SCANNERS:-scanner_nets}"
 PERSIST_ABUSIVE="${PERSIST_ABUSIVE:-/etc/ipset-abusive.conf}"
 PERSIST_SCANNERS="${PERSIST_SCANNERS:-/etc/ipset-scanners.conf}"
-LOG="${LOG:-/var/log/block-scanner-ips.log}"
+LOG="${LOG:-/var/log/enforce-ipset-blocks.log}"
 ABUSEIPDB_KEY_FILE="${ABUSEIPDB_KEY_FILE:-/etc/abuseipdb.key}"
 ABUSEIPDB_LOG="${ABUSEIPDB_LOG:-/var/log/abuseipdb-reports.log}"
 CONFIG_JS="${CONFIG_JS:-$SCRIPT_DIR/../html/config.js}"
@@ -68,7 +70,7 @@ data_path, ipset_abusive, ipset_scanners = sys.argv[1], sys.argv[2], sys.argv[3]
 BLOCK_HISTORY_FILE = os.environ.get('BLOCK_HISTORY_FILE', '/var/lib/log_analyzer/data/blocked_ips.json')
 SAFE_IPS_RAW = os.environ.get('SAFE_IPS', '188.89.187.128')
 IPTABLES_LOG_FILE = os.environ.get('IPTABLES_LOG', '/var/log/iptables-blocks.log')
-MAIN_LOG_FILE = os.environ.get('LOG', '/var/log/block-scanner-ips.log')
+MAIN_LOG_FILE = os.environ.get('LOG', '/var/log/enforce-ipset-blocks.log')
 ENABLE_IPTABLES_LOGGING = os.environ.get('ENABLE_IPTABLES_LOGGING', '1') == '1'
 # Configuration from environment
 ABUSEIPDB_KEY = os.environ.get('ABUSEIPDB_KEY', '')

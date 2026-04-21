@@ -49,7 +49,7 @@ html/
   data.sample.json        # Example data with RFC 5737 documentation IPs
 
 scripts/
-  block-scanner-ips.sh    # Cron job: extract malicious IPs from data.json → ipset
+  enforce-ipset-blocks.sh  # Cron job: enforce IP-based blocks via ipset (scanners, malicious, country)
   setup-ipsets.sh         # One-time: create ipsets + iptables rules
   load-country-blocks.sh  # Download country CIDR ranges from ipdeny.com → ipset
   nginx-exploit-paths.conf # nginx snippet: 403 on exploit paths (WordPress, .env, etc.)
@@ -187,10 +187,10 @@ This creates three ipsets:
 
 ```bash
 # Add to crontab (runs every 6 hours)
-echo "0 */6 * * * $(pwd)/scripts/block-scanner-ips.sh" | sudo crontab -
+echo "0 */6 * * * $(pwd)/scripts/enforce-ipset-blocks.sh" | sudo crontab -
 ```
 
-`block-scanner-ips.sh` reads `data.json` and:
+`enforce-ipset-blocks.sh` reads `data.json` and:
 - Blocks IPs hitting exploit paths (WordPress, `.env`, `.git`, PHP shells, etc.)
 - Blocks IPs from geo-blocked countries, **including CDN-proxied traffic** (Cloudflare, etc.)
 - Adds scanner rDNS matches (Censys, Shodan, etc.) to the scanner_nets set

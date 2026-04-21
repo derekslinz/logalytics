@@ -567,7 +567,7 @@ def parse_args():
         dest='remove_malicious_path',
         type=str,
         default=None,
-        help='Remove a malicious rule and exit. Uses the same normalization rules as add for literal paths.'
+        help='Remove a malicious rule and exit. For literal paths: normalized (trim, collapse //, ensure leading /, keep trailing /). Use --regex to treat as regex pattern.'
     )
     parser.add_argument(
         '--yes',
