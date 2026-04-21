@@ -7,8 +7,10 @@ import glob
 import gzip
 import subprocess
 import sys
+import time
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
+from collections import Counter
 
 LOG_FILES = ['/var/log/nginx/access.log', '/var/log/nginx/access.log.1']
 LOG_GLOBS = ['/var/log/nginx/access.log*']
@@ -37,10 +39,13 @@ BOTS_FILE = os.path.join(DATA_DIR, 'bots.json')
 MALICIOUS_FILE = os.path.join(DATA_DIR, 'malicious_paths.txt')
 ABUSIVE_FILE = os.path.join(DATA_DIR, 'abusive_ips.txt')
 BLOCK_HISTORY_FILE = os.path.join(DATA_DIR, 'blocked_ips.json')
+DNS_CACHE_FILE = os.path.join(DATA_DIR, 'dns_cache.json')
 
 # Optional cap; default keeps full range for timeline/history fidelity.
 # Set LOG_ANALYZER_MAX_SESSIONS to a positive integer to cap output.
 MAX_OUTPUT_SESSIONS = int(os.environ.get('LOG_ANALYZER_MAX_SESSIONS', '0') or '0')
+DNS_CACHE_TTL_SECONDS = int(os.environ.get('LOG_ANALYZER_DNS_CACHE_TTL_SECONDS', '604800') or '604800')
+DNS_CACHE_MAX_ENTRIES = int(os.environ.get('LOG_ANALYZER_DNS_CACHE_MAX_ENTRIES', '200000') or '200000')
 
 # Progress reporting controls
 PROGRESS_ENABLED = os.environ.get('LOG_ANALYZER_PROGRESS', '1') != '0'
@@ -151,6 +156,62 @@ def load_block_history():
     except Exception as e:
         print(f"Warning: Could not load blocked_ips.json: {e}")
     return {}
+
+def load_dns_cache():
+    try:
+        if not os.path.exists(DNS_CACHE_FILE):
+            return {}
+        with open(DNS_CACHE_FILE, 'r') as f:
+            raw = json.load(f)
+            if not isinstance(raw, dict):
+                return {}
+
+        now = int(time.time())
+        out = {}
+        for ip, entry in raw.items():
+            if isinstance(entry, str):
+                # Legacy format: {"ip": "hostname"}
+                out[ip] = {'hostname': entry, 'cached_at': now}
+                continue
+            if not isinstance(entry, dict):
+                continue
+
+            hostname = entry.get('hostname')
+            cached_at = int(entry.get('cached_at') or 0)
+            if DNS_CACHE_TTL_SECONDS > 0 and cached_at and (now - cached_at) > DNS_CACHE_TTL_SECONDS:
+                continue
+            out[ip] = {'hostname': hostname, 'cached_at': cached_at or now}
+        return out
+    except Exception as e:
+        print(f"Warning: Could not load dns_cache.json: {e}")
+    return {}
+
+def save_dns_cache(dns_cache):
+    try:
+        if not isinstance(dns_cache, dict):
+            return
+
+        items = sorted(
+            dns_cache.items(),
+            key=lambda kv: int((kv[1] or {}).get('cached_at', 0)),
+            reverse=True
+        )
+        if DNS_CACHE_MAX_ENTRIES > 0:
+            items = items[:DNS_CACHE_MAX_ENTRIES]
+
+        payload = {
+            ip: {
+                'hostname': entry.get('hostname') if isinstance(entry, dict) else None,
+                'cached_at': int((entry or {}).get('cached_at', int(time.time()))) if isinstance(entry, dict) else int(time.time())
+            }
+            for ip, entry in items
+        }
+
+        os.makedirs(os.path.dirname(DNS_CACHE_FILE), exist_ok=True)
+        with open(DNS_CACHE_FILE, 'w') as f:
+            json.dump(payload, f, indent=2, sort_keys=True)
+    except Exception as e:
+        print(f"Warning: Could not save dns_cache.json: {e}")
 
 import html
 
@@ -290,12 +351,15 @@ def analyze():
     bot_regexes = load_bots()
     malicious_paths_list = load_malicious_paths()
     block_history = load_block_history()
+    dns_cache = load_dns_cache()
+    progress('Loaded persistent DNS cache', len(dns_cache))
     
     city_reader = None
     asn_reader = None
     ip_cache = {}
     country_ips = {}
     sessions = {}
+    malicious_path_hits = Counter()
 
     try:
         city_reader = maxminddb.open_database(MMDB_FILE)
@@ -308,6 +372,11 @@ def analyze():
             return
 
         progress('Discovered log files', len(active_logs), len(active_logs), ', '.join(os.path.basename(p) for p in active_logs))
+
+        # Seed in-run cache from persistent DNS cache
+        for ip, entry in dns_cache.items():
+            ip_cache[ip] = {'hostname': entry.get('hostname'), 'partial': True}
+        progress('Seeded in-memory cache from persistent DNS cache', len(ip_cache))
 
         # Pre-pass for IP discovery
         new_ips = set()
@@ -330,7 +399,10 @@ def analyze():
             progress('Resolving rDNS', len(new_ips), extra='parallel lookup start')
             with ThreadPoolExecutor(max_workers=50) as ex:
                 hosts = list(ex.map(get_hostname, new_ips))
-            for ip, host in zip(new_ips, hosts): ip_cache[ip] = { 'hostname': host, 'partial': True }
+            now_ts = int(time.time())
+            for ip, host in zip(new_ips, hosts):
+                ip_cache[ip] = { 'hostname': host, 'partial': True }
+                dns_cache[ip] = {'hostname': host, 'cached_at': now_ts}
             progress('rDNS resolution complete', len(new_ips), extra='parallel lookup finished')
         else:
             progress('No new IPs require rDNS resolution')
@@ -363,11 +435,16 @@ def analyze():
                     path = normalize_path(path_parts[1] if len(path_parts) > 1 else '/')
                     ts = parse_time(data['time'])
                     status = int(data['status'])
+
+                    if (path in malicious_paths_list) or bool(MALICIOUS_PATHS_FALLBACK.search(path)):
+                        malicious_path_hits[path] += 1
                     
                     if origin_ip not in ip_cache or ip_cache[origin_ip].get('partial'):
                         geo_data = city_reader.get(origin_ip)
                         asn_num, asn_name = get_asn(origin_ip, asn_reader)
                         hostname = ip_cache[origin_ip].get('hostname') if origin_ip in ip_cache else get_hostname(origin_ip)
+                        if origin_ip not in dns_cache:
+                            dns_cache[origin_ip] = {'hostname': hostname, 'cached_at': int(time.time())}
                         is_verified_bot = verify_bot(origin_ip, hostname)
                         is_bot = is_verified_bot or any(r.search(data['agent']) for r in bot_regexes) or \
                                  bool(BOT_PATTERN_FALLBACK.search(data['agent']))
@@ -472,6 +549,8 @@ def analyze():
     except Exception as e:
         print(f"Error during analysis: {e}")
     finally:
+        save_dns_cache(dns_cache)
+        progress('Saved persistent DNS cache', len(dns_cache))
         if city_reader: city_reader.close()
         if asn_reader: asn_reader.close()
 
@@ -523,6 +602,17 @@ def analyze():
             print(f"Warning: Could not write to {f}: {e}")
 
     progress('Analysis complete', len(final_sessions), extra=f'unique IPs={len(ip_cache)}')
+
+    blocked_sessions = sum(1 for s in final_sessions if s.get('blocked_at') or s.get('block_reason'))
+    blocked_ips = len({s.get('origin_ip') for s in final_sessions if s.get('blocked_at') or s.get('block_reason')})
+    top_malicious_paths = malicious_path_hits.most_common(10)
+
+    print(f"Security stats: malicious_paths_seen={sum(malicious_path_hits.values())} unique_malicious_paths={len(malicious_path_hits)}")
+    if top_malicious_paths:
+        print("Top malicious paths:")
+        for path, hits in top_malicious_paths:
+            print(f"  - {path}: {hits}")
+    print(f"Blocked stats: blocked_ips={blocked_ips} blocked_sessions={blocked_sessions}")
 
     print(f"Analysis complete. {len(final_sessions)} clustered sessions from {len(ip_cache)} unique origin IPs.")
 

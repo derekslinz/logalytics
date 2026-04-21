@@ -680,9 +680,10 @@ function attachDrillDown(container) {
             const selectedText = window.getSelection ? window.getSelection().toString() : '';
             if (selectedText && selectedText.trim().length > 0) return;
 
-            // Keep expanded by default; only re-open if something hid it.
             if (detail && detail.style.display === 'none') {
                 expand();
+            } else if (detail) {
+                detail.style.display = 'none';
             }
         });
     });
@@ -955,9 +956,10 @@ function attachPathDrillDown(container) {
             const selectedText = window.getSelection ? window.getSelection().toString() : '';
             if (selectedText && selectedText.trim().length > 0) return;
 
-            // Keep expanded by default; only re-open if something hid it.
             if (detail.style.display === 'none') {
                 expand();
+            } else {
+                detail.style.display = 'none';
             }
         });
     });
