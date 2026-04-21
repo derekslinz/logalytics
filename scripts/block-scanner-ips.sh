@@ -38,9 +38,11 @@ fi
 
 RESULTS=$(python3 - "$DATA_JSON" "$IPSET_ABUSIVE" "$IPSET_SCANNERS" <<'PYEOF'
 import json, re, sys, subprocess, ipaddress, os, tempfile, time
+from datetime import datetime, timezone
 import urllib.request, urllib.parse
 
 data_path, ipset_abusive, ipset_scanners = sys.argv[1], sys.argv[2], sys.argv[3]
+BLOCK_HISTORY_FILE = os.environ.get('BLOCK_HISTORY_FILE', '/var/lib/log_analyzer/data/blocked_ips.json')
 
 # Configuration from environment
 ABUSEIPDB_KEY = os.environ.get('ABUSEIPDB_KEY', '')
@@ -102,8 +104,18 @@ with open(data_path) as f:
 block_ips = set()
 scanner_ips = set()
 reportable = {}  # ip -> set of malicious paths (for AbuseIPDB)
+block_reasons = {}  # ip -> {'reason': str, 'evidence': [str, ...]}
 
 IGNORE_IPS = {'::1', '127.0.0.1', '0.0.0.0'}
+
+def mark_block(ip, reason, evidence=None):
+    block_ips.add(ip)
+    if ip in block_reasons:
+        return
+    block_reasons[ip] = {
+        'reason': reason,
+        'evidence': [evidence] if evidence else []
+    }
 
 # Identify scanner IPs from notable rDNS
 for n in data.get('notable', []):
@@ -125,15 +137,15 @@ for s in data.get('sessions', []):
     # Block IPs from blocked countries (including Cloudflare-proxied)
     cc = s.get('geo', {}).get('country_code', '')
     if cc in BLOCKED_COUNTRIES:
-        block_ips.add(ip)
+        mark_block(ip, 'blocked_country', f'country={cc}')
         continue
     if s.get('is_malicious', False):
-        block_ips.add(ip)
+        mark_block(ip, 'session_marked_malicious', 'is_malicious=true')
         reportable.setdefault(ip, set()).update(s.get('path_summary', []))
         continue
     for p in s.get('path_summary', []):
         if is_scanner_path(p):
-            block_ips.add(ip)
+            mark_block(ip, 'malicious_path_probe', p)
             reportable.setdefault(ip, set()).update(s.get('path_summary', []))
             break
 
@@ -161,7 +173,7 @@ if ABUSEIPDB_KEY and unknown_ips:
             score = d.get('abuseConfidenceScore', 0)
             reports = d.get('totalReports', 0)
             if score >= ABUSE_SCORE_THRESHOLD and reports >= ABUSE_REPORT_THRESHOLD:
-                block_ips.add(ip)
+                mark_block(ip, 'abuseipdb_threshold', f'score={score},reports={reports}')
                 reportable.setdefault(ip, set()).add(f'AbuseIPDB score: {score}% ({reports} reports)')
                 abuse_blocked += 1
             time.sleep(0.1)
@@ -172,6 +184,49 @@ if ABUSEIPDB_KEY and unknown_ips:
 new_abusive = block_ips - existing
 for ip in new_abusive:
     subprocess.run(['ipset', 'add', ipset_abusive, ip], capture_output=True)
+
+# Persist first-seen block timestamp for newly blocked IPs
+try:
+    block_history = {}
+    if os.path.exists(BLOCK_HISTORY_FILE):
+        with open(BLOCK_HISTORY_FILE, 'r') as fh:
+            loaded = json.load(fh)
+            if isinstance(loaded, dict):
+                block_history = loaded
+
+    blocked_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace('+00:00', 'Z')
+    for ip in sorted(new_abusive):
+        reason_info = block_reasons.get(ip, {'reason': 'unknown', 'evidence': []})
+        existing_entry = block_history.get(ip)
+
+        if isinstance(existing_entry, str):
+            # Migrate legacy format: {"ip": "2026-...Z"}
+            block_history[ip] = {
+                'blocked_at': existing_entry,
+                'block_reason': reason_info.get('reason', 'unknown'),
+                'evidence': reason_info.get('evidence', [])
+            }
+            continue
+
+        if isinstance(existing_entry, dict):
+            # Preserve original blocked_at; fill missing metadata.
+            existing_entry.setdefault('blocked_at', blocked_at)
+            existing_entry.setdefault('block_reason', reason_info.get('reason', 'unknown'))
+            existing_entry.setdefault('evidence', reason_info.get('evidence', []))
+            continue
+
+        block_history[ip] = {
+            'blocked_at': blocked_at,
+            'block_reason': reason_info.get('reason', 'unknown'),
+            'evidence': reason_info.get('evidence', [])
+        }
+
+    os.makedirs(os.path.dirname(BLOCK_HISTORY_FILE), exist_ok=True)
+    with open(BLOCK_HISTORY_FILE, 'w') as fh:
+        json.dump(block_history, fh, indent=2, sort_keys=True)
+except Exception:
+    # Non-fatal: blocking should continue even if history persistence fails.
+    pass
 
 # Add individual scanner IPs to scanner_nets (as /32)
 new_scanner = 0

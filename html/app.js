@@ -87,6 +87,7 @@ function setupMap() {
         .then(res => res.json())
         .then(geoData => {
             L.geoJson(geoData, {
+                interactive: false,
                 style: function(feature) {
                     const code = (feature.properties.iso_a2 || feature.properties.ISO_A2 || '').toUpperCase();
                     if (BLOCKED_COUNTRIES.includes(code)) {
@@ -631,14 +632,17 @@ function renderIpDetailTable(ipList) {
             const pathList = [...ip.paths].slice(0, 3).join(', ') + (ip.paths.size > 3 ? ' (+' + (ip.paths.size - 3) + ')' : '');
             const ts = ip.lastSeen.replace('T', ' ').split('.')[0];
             const asnLabel = ip.asn ? `AS${ip.asn}${ip.asnName ? ' · ' + escapeHtml(ip.asnName) : ''}` : (ip.asnName ? escapeHtml(ip.asnName) : 'ASN unknown');
-            const seenDate = ts.split(' ')[0] || ts;
+            const firstTs = (ip.firstSeen || '').replace('T', ' ').split('.')[0];
+            const firstDate = firstTs.split(' ')[0] || firstTs || 'unknown';
+            const lastDate = ts.split(' ')[0] || ts || 'unknown';
+            const seenRange = firstDate === lastDate ? firstDate : `${firstDate} → ${lastDate}`;
             return `<tr>
                 <td style="padding: 4px 6px; border-bottom: 1px solid rgba(255,255,255,0.03);">
                     <a href="https://ipinfo.io/${ip.ip}" target="_blank" style="color: ${color}; text-decoration: none;">${ip.ip}</a>${blk}
                     ${ip.hostname ? '<div style="color: var(--text-secondary); font-size: 0.65rem;">' + ip.hostname + '</div>' : ''}
                     ${ip.city ? '<div style="color: var(--text-secondary); font-size: 0.65rem;">' + ip.city + '</div>' : ''}
                     <div style="color: var(--text-secondary); font-size: 0.65rem;">${asnLabel}</div>
-                    <div style="color: var(--text-secondary); font-size: 0.65rem;">Seen: ${seenDate}</div>
+                    <div style="color: var(--text-secondary); font-size: 0.65rem;">Seen: ${seenRange}</div>
                 </td>
                 <td style="padding: 4px 6px; border-bottom: 1px solid rgba(255,255,255,0.03); color: ${color};">${ip.type}</td>
                 <td style="padding: 4px 6px; border-bottom: 1px solid rgba(255,255,255,0.03); text-align: right;">${ip.reqs}</td>
@@ -840,10 +844,29 @@ function getTopPathEntries() {
 function renderPathIpDetailTable(path) {
     const sessionsByIp = {};
 
+    const windowSeenByIp = {};
+    filteredSessions.forEach((s) => {
+        if (!windowSeenByIp[s.origin_ip]) {
+            windowSeenByIp[s.origin_ip] = {
+                firstSeen: s.first_seen_iso,
+                lastSeen: s.last_seen_iso
+            };
+            return;
+        }
+
+        if (s.first_seen_iso < windowSeenByIp[s.origin_ip].firstSeen) {
+            windowSeenByIp[s.origin_ip].firstSeen = s.first_seen_iso;
+        }
+        if (s.last_seen_iso > windowSeenByIp[s.origin_ip].lastSeen) {
+            windowSeenByIp[s.origin_ip].lastSeen = s.last_seen_iso;
+        }
+    });
+
     filteredSessions.forEach((s) => {
         if (!(s.path_summary || []).includes(path)) return;
 
         if (!sessionsByIp[s.origin_ip]) {
+            const seenWindow = windowSeenByIp[s.origin_ip] || { firstSeen: s.first_seen_iso, lastSeen: s.last_seen_iso };
             sessionsByIp[s.origin_ip] = {
                 ip: s.origin_ip,
                 hits: 0,
@@ -854,19 +877,13 @@ function renderPathIpDetailTable(path) {
                 asn: s.geo.asn || '',
                 asnName: s.geo.asn_name || '',
                 type: getTrafficType(s),
-                firstSeen: s.first_seen_iso,
-                lastSeen: s.last_seen_iso
+                firstSeen: seenWindow.firstSeen,
+                lastSeen: seenWindow.lastSeen
             };
         }
 
         sessionsByIp[s.origin_ip].hits += Number(s.req_count || 0);
         sessionsByIp[s.origin_ip].sessions += 1;
-        if (s.last_seen_iso > sessionsByIp[s.origin_ip].lastSeen) {
-            sessionsByIp[s.origin_ip].lastSeen = s.last_seen_iso;
-        }
-        if (s.first_seen_iso < sessionsByIp[s.origin_ip].firstSeen) {
-            sessionsByIp[s.origin_ip].firstSeen = s.first_seen_iso;
-        }
         if (!sessionsByIp[s.origin_ip].asn && s.geo.asn) sessionsByIp[s.origin_ip].asn = s.geo.asn;
         if (!sessionsByIp[s.origin_ip].asnName && s.geo.asn_name) sessionsByIp[s.origin_ip].asnName = s.geo.asn_name;
     });
@@ -890,14 +907,17 @@ function renderPathIpDetailTable(path) {
             const blk = isBlocked ? ' <span style="background: #f43f5e; color: #fff; padding: 0 2px; border-radius: 2px; font-size: 0.55rem; font-weight: 700;">BLK</span>' : '';
             const ts = ip.lastSeen.replace('T', ' ').split('.')[0];
             const asnLabel = ip.asn ? `AS${ip.asn}${ip.asnName ? ' · ' + escapeHtml(ip.asnName) : ''}` : (ip.asnName ? escapeHtml(ip.asnName) : 'ASN unknown');
-            const seenDate = ts.split(' ')[0] || ts;
+            const firstTs = (ip.firstSeen || '').replace('T', ' ').split('.')[0];
+            const firstDate = firstTs.split(' ')[0] || firstTs || 'unknown';
+            const lastDate = ts.split(' ')[0] || ts || 'unknown';
+            const seenRange = firstDate === lastDate ? firstDate : `${firstDate} → ${lastDate}`;
             return `<tr>
                 <td style="padding: 4px 6px; border-bottom: 1px solid rgba(255,255,255,0.03);">
                     <a href="https://ipinfo.io/${ip.ip}" target="_blank" style="color: ${color}; text-decoration: none;">${ip.ip}</a>${blk}
                     ${ip.hostname ? '<div style="color: var(--text-secondary); font-size: 0.65rem;">' + escapeHtml(ip.hostname) + '</div>' : ''}
                     ${ip.city ? '<div style="color: var(--text-secondary); font-size: 0.65rem;">' + escapeHtml(ip.city) + '</div>' : ''}
                     <div style="color: var(--text-secondary); font-size: 0.65rem;">${asnLabel}</div>
-                    <div style="color: var(--text-secondary); font-size: 0.65rem;">Seen: ${seenDate}</div>
+                    <div style="color: var(--text-secondary); font-size: 0.65rem;">Seen: ${seenRange}</div>
                 </td>
                 <td style="padding: 4px 6px; border-bottom: 1px solid rgba(255,255,255,0.03); color: ${color};">${ip.type}</td>
                 <td style="padding: 4px 6px; border-bottom: 1px solid rgba(255,255,255,0.03); text-align: right;">${ip.hits}</td>
