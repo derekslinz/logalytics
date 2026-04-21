@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Logalytics</title>
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
-    <link rel="stylesheet" href="styles.css?v=2">
+    <link rel="stylesheet" href="styles.css?v=7">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
     <script src="https://unpkg.com/lucide@latest"></script>
     <script src="config.js" onerror="console.warn('config.js not found, using default configuration')"></script>
@@ -32,6 +32,13 @@
 
     <main>
         <aside class="sidebar">
+            <div class="panel-header" style="margin-bottom: 0.25rem;">
+                <h3>Dashboard Controls</h3>
+                <button id="close-left-panel" class="toggle-btn panel-collapse-btn">
+                    <i data-lucide="panel-left-close" style="width: 14px; height: 14px;"></i>
+                    <span>Collapse</span>
+                </button>
+            </div>
             <div class="card">
                 <div class="card-title">Total Requests</div>
                 <div id="total-req" class="stat-value">0</div>
@@ -86,12 +93,24 @@
             </button>
         </aside>
 
+        <div id="left-resize-handle" class="panel-resize-handle panel-resize-handle-left" title="Resize left panel" aria-label="Resize left panel" role="separator"></div>
+
         <section class="center-pane">
+            <button id="toggle-left-edge" class="toggle-btn hidden" title="Open left panel" aria-label="Open left panel">
+                <i data-lucide="panel-left-open" style="width: 14px; height: 14px;"></i>
+            </button>
+            <button id="toggle-feed-edge" class="toggle-btn hidden" title="Open live feed" aria-label="Open live feed">
+                <i data-lucide="panel-right-open" style="width: 14px; height: 14px;"></i>
+            </button>
             <div id="map"></div>
-            <div id="live-panel" class="side-panel">
+            <div id="live-panel" class="side-panel open">
+                <div id="right-resize-handle" class="panel-resize-handle panel-resize-handle-right" title="Resize right panel" aria-label="Resize right panel" role="separator"></div>
                 <div class="panel-header">
                     <h3>Live Traffic Feed</h3>
-                    <button id="close-feed" class="toggle-btn"><i data-lucide="x"></i></button>
+                    <button id="close-feed" class="toggle-btn panel-collapse-btn">
+                        <i data-lucide="panel-right-close" style="width: 14px; height: 14px;"></i>
+                        <span>Collapse</span>
+                    </button>
                 </div>
                 <div class="table-container">
                     <table>
@@ -111,6 +130,7 @@
                 </div>
             </div>
             <div class="timeline-container">
+                <div id="timeline-resize-handle" class="panel-resize-handle panel-resize-handle-bottom" title="Resize timeline" aria-label="Resize timeline" role="separator"></div>
                 <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.5rem;">
                     <div style="display: flex; gap: 0.75rem; align-items: center;">
                         <button id="btn-play" class="toggle-btn" style="padding: 4px 8px; border: 1px solid var(--border-color);"><i data-lucide="play" style="width: 14px; height: 14px;"></i></button>
@@ -126,7 +146,7 @@
                     <span id="end-time" style="font-size: 0.75rem; color: var(--text-secondary);">---</span>
                 </div>
                 <input type="range" id="timeline-slider" class="timeline-slider" min="0" max="100" value="100">
-                <div class="chart-container" style="height: 60px;">
+                <div class="chart-container timeline-volume-chart">
                     <canvas id="volumeChart"></canvas>
                 </div>
             </div>
@@ -136,7 +156,7 @@
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-datalabels@2.0.0"></script>
-    <script src="app.js?v=16"></script>
+    <script src="app.js?v=24"></script>
     <div id="notable-modal" class="modal-overlay">
         <div class="modal-content card" style="width: 90%; max-width: 800px; height: 80vh; display: flex; flex-direction: column;">
             <div class="card-title" style="display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--border-color); padding-bottom: 1rem;">

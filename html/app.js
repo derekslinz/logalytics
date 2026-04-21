@@ -6,9 +6,35 @@ let statusChart, volumeChart, typeChart;
 let currentFilter = 'all';
 let isPlaying = false;
 let playInterval;
+const PANEL_SIZE_STORAGE_KEY = 'logalytics-panel-sizes-v1';
+const PANEL_SIZE_LIMITS = {
+    leftMin: 260,
+    leftMax: 700,
+    rightMin: 420,
+    rightMax: 1400,
+    timelineMin: 110,
+    timelineMax: 500
+};
 const BLOCKED_COUNTRIES = (window.APP_CONFIG && window.APP_CONFIG.BLOCKED_COUNTRIES) 
     ? window.APP_CONFIG.BLOCKED_COUNTRIES 
     : ['RU', 'BY', 'KZ', 'BR', 'IN', 'CN', 'PH', 'ID', 'IR', 'KP', 'VN', 'NG'];
+
+function getSessionTimestamp(session, kind = 'last') {
+    const numericKey = kind === 'first' ? 'first_seen' : 'last_seen';
+    const isoKey = kind === 'first' ? 'first_seen_iso' : 'last_seen_iso';
+
+    const numeric = Number(session?.[numericKey]);
+    if (Number.isFinite(numeric) && numeric > 0) {
+        return numeric * 1000;
+    }
+
+    const parsed = Date.parse(session?.[isoKey]);
+    if (Number.isFinite(parsed)) {
+        return parsed;
+    }
+
+    return 0;
+}
 
 async function init() {
     if (typeof ChartDataLabels !== 'undefined') {
@@ -16,7 +42,8 @@ async function init() {
     }
     
     try {
-        const response = await fetch('data.json');
+        const dataUrl = `data.json?v=${Date.now()}`;
+        const response = await fetch(dataUrl, { cache: 'no-store' });
         if (!response.ok) throw new Error("Fetch failed: " + response.status);
         const data = await response.json();
         const IGNORE_IPS = ['::1', '127.0.0.1', '0.0.0.0'];
@@ -28,14 +55,15 @@ async function init() {
             return;
         }
 
-        // Sort by last seen
-        allSessions.sort((a, b) => new Date(a.last_seen_iso) - new Date(b.last_seen_iso));
+        // Sort by last seen (numeric timestamp preferred for stability)
+        allSessions.sort((a, b) => getSessionTimestamp(a, 'last') - getSessionTimestamp(b, 'last'));
         
         document.getElementById('timeline-slider').value = 100;
 
         setupMap();
         setupCharts();
         setupEvents();
+        setupPanelResizers();
         updateDashboard();
         allNotable = data.notable || [];
         updateNotableDomains(allNotable);
@@ -149,8 +177,40 @@ function setupCharts() {
         options: {
             responsive: true,
             maintainAspectRatio: false,
-            plugins: { legend: { display: false }, datalabels: { display: false } },
-            scales: { x: { display: false }, y: { display: false } }
+            plugins: {
+                legend: { display: false },
+                datalabels: { display: false },
+                tooltip: {
+                    callbacks: {
+                        label: (ctx) => `Requests: ${ctx.parsed.y.toLocaleString()}`
+                    }
+                }
+            },
+            scales: {
+                x: {
+                    display: false,
+                    grid: { display: false }
+                },
+                y: {
+                    display: true,
+                    beginAtZero: true,
+                    ticks: {
+                        color: '#94a3b8',
+                        maxTicksLimit: 4,
+                        callback: (value) => Number(value).toLocaleString()
+                    },
+                    title: {
+                        display: true,
+                        text: 'Requests',
+                        color: '#94a3b8',
+                        font: { size: 10, weight: '600' }
+                    },
+                    grid: {
+                        color: 'rgba(255, 255, 255, 0.08)',
+                        drawBorder: false
+                    }
+                }
+            }
         }
     });
 }
@@ -176,9 +236,13 @@ function updateDashboard() {
     document.getElementById('unique-ips').innerText = uniqueIPs.toLocaleString();
 
     if (total > 0 && allSessions[0] && allSessions[maxIdx]) {
-        document.getElementById('start-time').innerText = formatDate(new Date(allSessions[0].first_seen_iso));
-        document.getElementById('current-time').innerText = formatDate(new Date(allSessions[maxIdx].last_seen_iso));
-        document.getElementById('end-time').innerText = formatDate(new Date(allSessions[allSessions.length - 1].last_seen_iso));
+        const startTs = Math.min(...allSessions.map(s => getSessionTimestamp(s, 'first')).filter(ts => ts > 0));
+        const endTs = Math.max(...allSessions.map(s => getSessionTimestamp(s, 'last')).filter(ts => ts > 0));
+        const currentTs = Math.max(...allSessions.slice(0, maxIdx + 1).map(s => getSessionTimestamp(s, 'last')).filter(ts => ts > 0));
+
+        document.getElementById('start-time').innerText = formatDate(new Date(startTs));
+        document.getElementById('current-time').innerText = formatDate(new Date(currentTs));
+        document.getElementById('end-time').innerText = formatDate(new Date(endTs));
     }
 
     updateMarkers();
@@ -235,6 +299,26 @@ function updateChartsData() {
     typeChart.data.datasets[0].data = [legit, cloud, hosting, bots, malicious];
     typeChart.data.datasets[0].backgroundColor = ['#00f2ff', '#a855f7', '#22c55e', '#ffaa00', '#f43f5e'];
     typeChart.update();
+
+    const statusTotals = [0, 0, 0, 0]; // 2xx, 3xx, 4xx, 5xx
+    filteredSessions.forEach((s) => {
+        if (s.status_counts) {
+            statusTotals[0] += Number(s.status_counts['2xx'] || 0);
+            statusTotals[1] += Number(s.status_counts['3xx'] || 0);
+            statusTotals[2] += Number(s.status_counts['4xx'] || 0);
+            statusTotals[3] += Number(s.status_counts['5xx'] || 0);
+            return;
+        }
+
+        // Legacy fallback: old datasets may not include per-status buckets.
+        if (s.is_malicious || isScannerTraffic(s)) {
+            statusTotals[2] += Number(s.req_count || 0);
+        } else {
+            statusTotals[0] += Number(s.req_count || 0);
+        }
+    });
+    statusChart.data.datasets[0].data = statusTotals;
+    statusChart.update();
 
     const volumeData = new Array(30).fill(0);
     const bucketSize = Math.max(1, Math.floor(allSessions.length / 30));
@@ -624,8 +708,21 @@ function setupEvents() {
         }
     });
     document.getElementById('btn-play').addEventListener('click', togglePlay);
-    document.getElementById('toggle-feed').addEventListener('click', () => document.getElementById('live-panel').classList.add('open'));
-    document.getElementById('close-feed').addEventListener('click', () => document.getElementById('live-panel').classList.remove('open'));
+    const livePanel = document.getElementById('live-panel');
+    const edgeToggle = document.getElementById('toggle-feed-edge');
+    const setLivePanelOpen = (open) => {
+        if (!livePanel) return;
+        livePanel.classList.toggle('open', open);
+        if (edgeToggle) edgeToggle.classList.toggle('hidden', open);
+        refreshResizableLayout();
+    };
+
+    document.getElementById('toggle-feed').addEventListener('click', () => setLivePanelOpen(true));
+    if (edgeToggle) {
+        edgeToggle.addEventListener('click', () => setLivePanelOpen(true));
+    }
+    document.getElementById('close-feed').addEventListener('click', () => setLivePanelOpen(false));
+    setLivePanelOpen(true);
 
     document.getElementById('open-notable-modal').addEventListener('click', () => {
         const modal = document.getElementById('notable-modal');
@@ -726,6 +823,137 @@ function setupEvents() {
             if (e.target === modal) modal.classList.remove('open');
         });
     });
+}
+
+function clamp(value, min, max) {
+    return Math.max(min, Math.min(max, value));
+}
+
+function loadPanelSizes() {
+    try {
+        const raw = localStorage.getItem(PANEL_SIZE_STORAGE_KEY);
+        if (!raw) return {};
+        const parsed = JSON.parse(raw);
+        return {
+            left: Number(parsed.left),
+            right: Number(parsed.right),
+            timeline: Number(parsed.timeline)
+        };
+    } catch {
+        return {};
+    }
+}
+
+function savePanelSizes(left, right, timeline) {
+    try {
+        localStorage.setItem(PANEL_SIZE_STORAGE_KEY, JSON.stringify({ left, right, timeline }));
+    } catch {
+        // no-op
+    }
+}
+
+function applyPanelSizes(left, right, timeline) {
+    const root = document.documentElement;
+    if (Number.isFinite(left)) {
+        root.style.setProperty('--left-sidebar-width', `${left}px`);
+    }
+    if (Number.isFinite(right)) {
+        root.style.setProperty('--right-panel-width', `${right}px`);
+    }
+    if (Number.isFinite(timeline)) {
+        root.style.setProperty('--timeline-height', `${timeline}px`);
+    }
+}
+
+function refreshResizableLayout() {
+    if (map) {
+        setTimeout(() => map.invalidateSize(), 0);
+    }
+    if (statusChart) statusChart.resize();
+    if (typeChart) typeChart.resize();
+    if (volumeChart) volumeChart.resize();
+}
+
+function setupPanelResizers() {
+    const leftHandle = document.getElementById('left-resize-handle');
+    const rightHandle = document.getElementById('right-resize-handle');
+    const timelineHandle = document.getElementById('timeline-resize-handle');
+    const timeline = document.querySelector('.timeline-container');
+    const centerPane = document.querySelector('.center-pane');
+    const main = document.querySelector('main');
+
+    if (!leftHandle || !rightHandle || !timelineHandle || !timeline || !centerPane || !main) return;
+
+    const loaded = loadPanelSizes();
+    const initialLeft = Number.isFinite(loaded.left)
+        ? clamp(loaded.left, PANEL_SIZE_LIMITS.leftMin, PANEL_SIZE_LIMITS.leftMax)
+        : 350;
+    const initialRight = Number.isFinite(loaded.right)
+        ? clamp(loaded.right, PANEL_SIZE_LIMITS.rightMin, PANEL_SIZE_LIMITS.rightMax)
+        : 900;
+    const initialTimeline = Number.isFinite(loaded.timeline)
+        ? clamp(loaded.timeline, PANEL_SIZE_LIMITS.timelineMin, PANEL_SIZE_LIMITS.timelineMax)
+        : 150;
+
+    applyPanelSizes(initialLeft, initialRight, initialTimeline);
+
+    let active = null;
+    let leftWidth = initialLeft;
+    let rightWidth = initialRight;
+    let timelineHeight = initialTimeline;
+
+    const onPointerMove = (e) => {
+        if (!active) return;
+
+        if (active === 'left') {
+            const rect = main.getBoundingClientRect();
+            leftWidth = clamp(e.clientX - rect.left, PANEL_SIZE_LIMITS.leftMin, PANEL_SIZE_LIMITS.leftMax);
+            applyPanelSizes(leftWidth, null);
+        } else if (active === 'right') {
+            rightWidth = clamp(window.innerWidth - e.clientX, PANEL_SIZE_LIMITS.rightMin, PANEL_SIZE_LIMITS.rightMax);
+            applyPanelSizes(null, rightWidth);
+        } else if (active === 'timeline') {
+            const paneRect = centerPane.getBoundingClientRect();
+            const dynamicMax = Math.max(PANEL_SIZE_LIMITS.timelineMin, Math.min(PANEL_SIZE_LIMITS.timelineMax, paneRect.height - 80));
+            timelineHeight = clamp(paneRect.bottom - e.clientY, PANEL_SIZE_LIMITS.timelineMin, dynamicMax);
+            applyPanelSizes(null, null, timelineHeight);
+        }
+
+        refreshResizableLayout();
+    };
+
+    const stopResize = () => {
+        if (!active) return;
+        const wasTimeline = active === 'timeline';
+        active = null;
+        document.body.classList.remove('is-resizing');
+        document.body.classList.remove('is-resizing-row');
+        savePanelSizes(leftWidth, rightWidth, timelineHeight);
+        refreshResizableLayout();
+        if (wasTimeline) updateDashboard();
+        window.removeEventListener('pointermove', onPointerMove);
+        window.removeEventListener('pointerup', stopResize);
+        window.removeEventListener('pointercancel', stopResize);
+    };
+
+    const startResize = (side) => (e) => {
+        e.preventDefault();
+        active = side;
+        if (side === 'timeline') {
+            document.body.classList.add('is-resizing-row');
+        } else {
+            document.body.classList.add('is-resizing');
+        }
+        window.addEventListener('pointermove', onPointerMove);
+        window.addEventListener('pointerup', stopResize);
+        window.addEventListener('pointercancel', stopResize);
+    };
+
+    leftHandle.addEventListener('pointerdown', startResize('left'));
+    rightHandle.addEventListener('pointerdown', startResize('right'));
+    timelineHandle.addEventListener('pointerdown', startResize('timeline'));
+
+    window.addEventListener('resize', refreshResizableLayout);
 }
 
 function togglePlay() {

@@ -4,11 +4,13 @@ import maxminddb
 import socket
 import os
 import glob
+import gzip
 import subprocess
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
 
 LOG_FILES = ['/var/log/nginx/access.log', '/var/log/nginx/access.log.1']
+LOG_GLOBS = ['/var/log/nginx/access.log*']
 MMDB_FILE = '/var/lib/GeoIP/GeoLite2-City.mmdb'
 ASN_MMDB_FILE = '/var/lib/GeoIP/GeoLite2-ASN.mmdb'
 OWNER_IP = '143.179.217.69'
@@ -33,6 +35,10 @@ DATA_DIR = '/var/lib/log_analyzer/data'
 BOTS_FILE = os.path.join(DATA_DIR, 'bots.json')
 MALICIOUS_FILE = os.path.join(DATA_DIR, 'malicious_paths.txt')
 ABUSIVE_FILE = os.path.join(DATA_DIR, 'abusive_ips.txt')
+
+# Optional cap; default keeps full range for timeline/history fidelity.
+# Set LOG_ANALYZER_MAX_SESSIONS to a positive integer to cap output.
+MAX_OUTPUT_SESSIONS = int(os.environ.get('LOG_ANALYZER_MAX_SESSIONS', '0') or '0')
 
 # Fallback Regex Patterns
 BOT_PATTERN_FALLBACK = re.compile(
@@ -200,6 +206,29 @@ def normalize_path(path):
     path = re.sub(r'/+', '/', path)
     return path
 
+def open_log_file(path):
+    if path.endswith('.gz'):
+        return gzip.open(path, 'rt', encoding='utf-8', errors='replace')
+    return open(path, 'r', encoding='utf-8', errors='replace')
+
+def discover_log_files():
+    discovered = set(LOG_FILES)
+    for pattern in LOG_GLOBS:
+        for p in glob.glob(pattern):
+            discovered.add(p)
+
+    existing = [p for p in discovered if os.path.exists(p)]
+
+    def log_sort_key(path):
+        if path.endswith('access.log'):
+            return 0
+        m = re.search(r'access\.log\.(\d+)', path)
+        if m:
+            return int(m.group(1))
+        return 10_000
+
+    return sorted(existing, key=log_sort_key)
+
 def analyze():
     bot_regexes = load_bots()
     malicious_paths_list = load_malicious_paths()
@@ -214,13 +243,13 @@ def analyze():
         city_reader = maxminddb.open_database(MMDB_FILE)
         asn_reader = maxminddb.open_database(ASN_MMDB_FILE)
 
-        active_logs = [f for f in LOG_FILES if os.path.exists(f)]
+        active_logs = discover_log_files()
         if not active_logs: return
 
         # Pre-pass for IP discovery
         new_ips = set()
         for log_file in active_logs:
-            with open(log_file, 'r') as f:
+            with open_log_file(log_file) as f:
                 for line in f:
                     match = LOG_PATTERN.match(line)
                     if match:
@@ -235,7 +264,7 @@ def analyze():
             for ip, host in zip(new_ips, hosts): ip_cache[ip] = { 'hostname': host, 'partial': True }
 
         for log_file in active_logs:
-            with open(log_file, 'r') as f:
+            with open_log_file(log_file) as f:
                 for line in f:
                     match = LOG_PATTERN.match(line)
                     if not match: continue
@@ -294,6 +323,7 @@ def analyze():
                             'edge_ip': edge_ip,
                             'geo': ip_cache[origin_ip],
                             'requests': [],
+                            'status_counts': {'2xx': 0, '3xx': 0, '4xx': 0, '5xx': 0},
                             'first_seen': ts,
                             'last_seen': ts,
                             'intent': "Passive Traffic",
@@ -303,6 +333,14 @@ def analyze():
                     
                     s = sessions[s_key]
                     s['requests'].append({'time': ts, 'path': sanitize(path), 'status': status})
+                    if 200 <= status < 300:
+                        s['status_counts']['2xx'] += 1
+                    elif 300 <= status < 400:
+                        s['status_counts']['3xx'] += 1
+                    elif 400 <= status < 500:
+                        s['status_counts']['4xx'] += 1
+                    elif 500 <= status < 600:
+                        s['status_counts']['5xx'] += 1
                     s['first_seen'] = min(s['first_seen'], ts)
                     s['last_seen'] = max(s['last_seen'], ts)
                     
@@ -358,8 +396,10 @@ def analyze():
     final_sessions.sort(key=lambda x: x['last_seen'], reverse=True)
 
     # Recompute Uniques Correctly
+    output_sessions = final_sessions[:MAX_OUTPUT_SESSIONS] if MAX_OUTPUT_SESSIONS > 0 else final_sessions
+
     output_data = {
-        'sessions': final_sessions[:300],
+        'sessions': output_sessions,
         'summary': {
             'countries': {c: {k: (len(v) if isinstance(v, set) else v) for k, v in st.items()} for c, st in country_ips.items()},
             'total_requests': sum(s['req_count'] for s in final_sessions),
