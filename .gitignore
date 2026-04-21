@@ -9,3 +9,5 @@ node_modules
 package-lock.json
 package.json
 *.pyc
+scripts/__pycache__/log_analyze.cpython-312.pyc
+scripts/__pycache__/*

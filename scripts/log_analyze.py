@@ -8,9 +8,9 @@ import gzip
 import subprocess
 import sys
 import time
+import argparse
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
-from collections import Counter
 
 LOG_FILES = ['/var/log/nginx/access.log', '/var/log/nginx/access.log.1']
 LOG_GLOBS = ['/var/log/nginx/access.log*']
@@ -120,6 +120,50 @@ def load_malicious_paths():
     except Exception as e:
         print(f"Warning: Could not load malicious_paths.txt: {e}")
     return set()
+
+def save_malicious_path(path):
+    os.makedirs(os.path.dirname(MALICIOUS_FILE), exist_ok=True)
+    with open(MALICIOUS_FILE, 'a') as f:
+        f.write(f"{path}\n")
+
+def normalize_malicious_path(value):
+    path = normalize_path((value or '').strip())
+    if not path:
+        return ''
+    if not path.startswith('/'):
+        path = '/' + path
+    return path
+
+def confirm_add_malicious_path(path):
+    warning = (
+        "WARNING: Adding a malicious path can increase false positives and may block legitimate traffic.\n"
+        f"Path to add: {path}\n"
+        "Type 'yes' to confirm: "
+    )
+    try:
+        answer = input(warning)
+    except EOFError:
+        return False
+    return answer.strip().lower() == 'yes'
+
+def add_malicious_path(path, force=False):
+    normalized_path = normalize_malicious_path(path)
+    if not normalized_path:
+        print("Error: --add-malicious-path requires a non-empty path value.", file=sys.stderr)
+        return 1
+
+    existing = load_malicious_paths()
+    if normalized_path in existing:
+        print(f"No change: path already exists in malicious list: {normalized_path}")
+        return 0
+
+    if not force and not confirm_add_malicious_path(normalized_path):
+        print("Aborted: malicious path was not added.", file=sys.stderr)
+        return 1
+
+    save_malicious_path(normalized_path)
+    print(f"Added malicious path: {normalized_path}")
+    return 0
 
 def load_abusive_ips():
     try:
@@ -346,7 +390,60 @@ def progress(stage, current=None, total=None, extra=''):
 
     print(msg, file=sys.stderr, flush=True)
 
-def analyze():
+def update_path_stats(store, path, session_key, ip, is_blocked):
+    entry = store.get(path)
+    if entry is None:
+        entry = {
+            'hits': 0,
+            'sessions': set(),
+            'ips': set(),
+            'blocked_sessions': set(),
+            'blocked_ips': set(),
+        }
+        store[path] = entry
+
+    entry['hits'] += 1
+    entry['sessions'].add(session_key)
+    entry['ips'].add(ip)
+    if is_blocked:
+        entry['blocked_sessions'].add(session_key)
+        entry['blocked_ips'].add(ip)
+
+def top_path_items(path_stats, limit):
+    items = sorted(path_stats.items(), key=lambda kv: kv[1]['hits'], reverse=True)
+    if limit > 0:
+        return items[:limit]
+    return items
+
+def parse_args():
+    parser = argparse.ArgumentParser(
+        prog='log_analyze.py',
+        description='Analyze nginx access logs into clustered session telemetry JSON for Logalytics.'
+    )
+    parser.add_argument(
+        '--top-paths',
+        dest='top_paths',
+        type=int,
+        default=10,
+        help='Number of top malicious and non-malicious paths to print in summary stats (default: 10).'
+    )
+    parser.add_argument(
+        '--add-malicious-path',
+        dest='add_malicious_path',
+        type=str,
+        default=None,
+        help='Manually add a path to malicious_paths.txt and exit.'
+    )
+    parser.add_argument(
+        '--yes',
+        dest='yes',
+        action='store_true',
+        help='Skip confirmation prompt when using --add-malicious-path.'
+    )
+    return parser.parse_args()
+
+def analyze(top_paths=10):
+    top_paths = max(0, int(top_paths))
     progress('Initializing analysis')
     bot_regexes = load_bots()
     malicious_paths_list = load_malicious_paths()
@@ -359,8 +456,8 @@ def analyze():
     ip_cache = {}
     country_ips = {}
     sessions = {}
-    malicious_path_hits = Counter()
-    non_malicious_path_hits = Counter()
+    malicious_path_stats = {}
+    non_malicious_path_stats = {}
 
     try:
         city_reader = maxminddb.open_database(MMDB_FILE)
@@ -436,12 +533,15 @@ def analyze():
                     path = normalize_path(path_parts[1] if len(path_parts) > 1 else '/')
                     ts = parse_time(data['time'])
                     status = int(data['status'])
+                    s_key = (origin_ip, data['agent'])
+                    block_meta = block_history.get(origin_ip, {})
+                    is_blocked_origin = bool(block_meta.get('blocked_at') or block_meta.get('block_reason'))
 
                     is_malicious_path = (path in malicious_paths_list) or bool(MALICIOUS_PATHS_FALLBACK.search(path))
                     if is_malicious_path:
-                        malicious_path_hits[path] += 1
+                        update_path_stats(malicious_path_stats, path, s_key, origin_ip, is_blocked_origin)
                     else:
-                        non_malicious_path_hits[path] += 1
+                        update_path_stats(non_malicious_path_stats, path, s_key, origin_ip, is_blocked_origin)
                     
                     if origin_ip not in ip_cache or ip_cache[origin_ip].get('partial'):
                         geo_data = city_reader.get(origin_ip)
@@ -473,9 +573,7 @@ def analyze():
                         }
 
                     # Session Discovery & Level 2 Aggregation
-                    s_key = (origin_ip, data['agent'])
                     if s_key not in sessions:
-                        block_meta = block_history.get(origin_ip, {})
                         sessions[s_key] = {
                             'origin_ip': origin_ip,
                             'edge_ip': edge_ip,
@@ -609,22 +707,42 @@ def analyze():
 
     blocked_sessions = sum(1 for s in final_sessions if s.get('blocked_at') or s.get('block_reason'))
     blocked_ips = len({s.get('origin_ip') for s in final_sessions if s.get('blocked_at') or s.get('block_reason')})
-    top_malicious_paths = malicious_path_hits.most_common(10)
-    top_non_malicious_paths = non_malicious_path_hits.most_common(10)
+    blocked_paths = len({
+        path
+        for path, stats in {**malicious_path_stats, **non_malicious_path_stats}.items()
+        if stats['blocked_sessions']
+    })
 
-    print(f"Security stats: malicious_paths_seen={sum(malicious_path_hits.values())} unique_malicious_paths={len(malicious_path_hits)}")
-    if top_malicious_paths:
+    top_malicious_paths = top_path_items(malicious_path_stats, top_paths)
+    top_non_malicious_paths = top_path_items(non_malicious_path_stats, top_paths)
+
+    malicious_paths_seen = sum(stats['hits'] for stats in malicious_path_stats.values())
+    non_malicious_paths_seen = sum(stats['hits'] for stats in non_malicious_path_stats.values())
+
+    print(f"Security stats: malicious_paths_seen={malicious_paths_seen} unique_malicious_paths={len(malicious_path_stats)}")
+    if top_paths > 0 and top_malicious_paths:
         print("Top malicious paths:")
-        for path, hits in top_malicious_paths:
-            print(f"  - {path}: {hits}")
-    print(f"Security stats: non_malicious_paths_seen={sum(non_malicious_path_hits.values())} unique_non_malicious_paths={len(non_malicious_path_hits)}")
-    if top_non_malicious_paths:
+        for path, stats in top_malicious_paths:
+            print(
+                f"  - {path}: hits={stats['hits']} sessions={len(stats['sessions'])} "
+                f"ips={len(stats['ips'])} blocked_sessions={len(stats['blocked_sessions'])} "
+                f"blocked_ips={len(stats['blocked_ips'])}"
+            )
+    print(f"Security stats: non_malicious_paths_seen={non_malicious_paths_seen} unique_non_malicious_paths={len(non_malicious_path_stats)}")
+    if top_paths > 0 and top_non_malicious_paths:
         print("Top non-malicious paths:")
-        for path, hits in top_non_malicious_paths:
-            print(f"  - {path}: {hits}")
-    print(f"Blocked stats: blocked_ips={blocked_ips} blocked_sessions={blocked_sessions}")
+        for path, stats in top_non_malicious_paths:
+            print(
+                f"  - {path}: hits={stats['hits']} sessions={len(stats['sessions'])} "
+                f"ips={len(stats['ips'])} blocked_sessions={len(stats['blocked_sessions'])} "
+                f"blocked_ips={len(stats['blocked_ips'])}"
+            )
+    print(f"Blocked stats: blocked_paths={blocked_paths} blocked_ips={blocked_ips} blocked_sessions={blocked_sessions}")
 
     print(f"Analysis complete. {len(final_sessions)} clustered sessions from {len(ip_cache)} unique origin IPs.")
 
 if __name__ == '__main__':
-    analyze()
+    args = parse_args()
+    if args.add_malicious_path is not None:
+        raise SystemExit(add_malicious_path(args.add_malicious_path, force=args.yes))
+    analyze(top_paths=args.top_paths)
