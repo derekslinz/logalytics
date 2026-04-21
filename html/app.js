@@ -82,11 +82,17 @@ function setupMap() {
         maxZoom: 19
     }).addTo(map);
 
+    // Custom pane to isolate country polygons and prevent them from intercepting clicks
+    map.createPane('countryPane');
+    map.getPane('countryPane').style.zIndex = 300; // Place behind markers (which default to 400)
+    map.getPane('countryPane').style.pointerEvents = 'none'; // Completely disable mouse interactions
+
     // Blocked Country Shading
     fetch('countries.geojson')
         .then(res => res.json())
         .then(geoData => {
             L.geoJson(geoData, {
+                pane: 'countryPane',
                 interactive: false,
                 style: function(feature) {
                     const code = (feature.properties.iso_a2 || feature.properties.ISO_A2 || '').toUpperCase();

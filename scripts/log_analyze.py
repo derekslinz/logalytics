@@ -35,6 +35,7 @@ DATA_DIR = '/var/lib/log_analyzer/data'
 BOTS_FILE = os.path.join(DATA_DIR, 'bots.json')
 MALICIOUS_FILE = os.path.join(DATA_DIR, 'malicious_paths.txt')
 ABUSIVE_FILE = os.path.join(DATA_DIR, 'abusive_ips.txt')
+BLOCK_HISTORY_FILE = os.path.join(DATA_DIR, 'blocked_ips.json')
 
 # Optional cap; default keeps full range for timeline/history fidelity.
 # Set LOG_ANALYZER_MAX_SESSIONS to a positive integer to cap output.
@@ -118,6 +119,33 @@ def load_abusive_ips():
     except Exception as e:
         print(f"Warning: Could not load abusive_ips.txt: {e}")
     return set()
+
+def load_block_history():
+    try:
+        if os.path.exists(BLOCK_HISTORY_FILE):
+            with open(BLOCK_HISTORY_FILE, 'r') as f:
+                raw = json.load(f)
+                if not isinstance(raw, dict):
+                    return {}
+
+                normalized = {}
+                for ip, entry in raw.items():
+                    if isinstance(entry, str):
+                        normalized[ip] = {
+                            'blocked_at': entry,
+                            'block_reason': 'unknown',
+                            'evidence': []
+                        }
+                    elif isinstance(entry, dict):
+                        normalized[ip] = {
+                            'blocked_at': entry.get('blocked_at'),
+                            'block_reason': entry.get('block_reason', 'unknown'),
+                            'evidence': entry.get('evidence', []) if isinstance(entry.get('evidence', []), list) else []
+                        }
+                return normalized
+    except Exception as e:
+        print(f"Warning: Could not load blocked_ips.json: {e}")
+    return {}
 
 import html
 
@@ -237,6 +265,7 @@ def discover_log_files():
 def analyze():
     bot_regexes = load_bots()
     malicious_paths_list = load_malicious_paths()
+    block_history = load_block_history()
     
     city_reader = None
     asn_reader = None
@@ -324,6 +353,7 @@ def analyze():
                     # Session Discovery & Level 2 Aggregation
                     s_key = (origin_ip, data['agent'])
                     if s_key not in sessions:
+                        block_meta = block_history.get(origin_ip, {})
                         sessions[s_key] = {
                             'origin_ip': origin_ip,
                             'edge_ip': edge_ip,
@@ -334,7 +364,10 @@ def analyze():
                             'last_seen': ts,
                             'intent': "Passive Traffic",
                             'tags': [],
-                            'is_malicious': False
+                            'is_malicious': False,
+                            'blocked_at': block_meta.get('blocked_at'),
+                            'block_reason': block_meta.get('block_reason'),
+                            'block_evidence': block_meta.get('evidence', [])
                         }
                     
                     s = sessions[s_key]
