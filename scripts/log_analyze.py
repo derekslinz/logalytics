@@ -64,7 +64,7 @@ CENSUS_BOT_PATTERN = re.compile(
 )
 
 MALICIOUS_PATHS_FALLBACK = re.compile(
-    r'(\.php|wp-admin|wp-login|xml-?rpc|\.env|\.git|\.config|admin|backup|shell|cgi-bin|wp/v2/users|server-status|login\.action|login\.do|\.jsp|\.asp|\.aws/|\.ssh/|\.kube/)',
+    r'(\.php|wp-admin|wp-login|xml-?rpc|\.env|\.git|\.config|admin|backup|shell|cgi-bin|wp/v2/users|server-status|login\.action|login\.do|\.jsp|\.asp|\.aws/|\.ssh/|\.kube/|ecp/)',
     re.IGNORECASE
 )
 
