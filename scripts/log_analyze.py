@@ -17,7 +17,7 @@ LOG_FILES = ['/var/log/nginx/access.log', '/var/log/nginx/access.log.1']
 LOG_GLOBS = ['/var/log/nginx/access.log*']
 MMDB_FILE = '/var/lib/GeoIP/GeoLite2-City.mmdb'
 ASN_MMDB_FILE = '/var/lib/GeoIP/GeoLite2-ASN.mmdb'
-OWNER_IP = '143.179.217.69'
+OWNER_IP = '188.89.187.128'
 OUTPUT_FILES = [
     '/var/www/logalytics/html/data.json',
     '/root/.gemini/antigravity/scratch/log_analyzer/web/data.json'
@@ -772,8 +772,8 @@ def analyze(top_paths=10):
                                     bool(CENSUS_BOT_PATTERN.search(ip_cache[origin_ip]['hostname'] or ''))
 
                     is_malicious = (status >= 400 and not ip_cache[origin_ip]['is_bot']) or \
-                                  is_malicious_path_match(path, malicious_literal_paths, malicious_regex_paths) or \
-                                  bool(MALICIOUS_PATHS_FALLBACK.search(path)) or \
+                                  (status >= 400 and is_malicious_path_match(path, malicious_literal_paths, malicious_regex_paths)) or \
+                                  (status >= 400 and bool(MALICIOUS_PATHS_FALLBACK.search(path))) or \
                                   (c_code in ['RU', 'BY']) or \
                                   is_census_bot
                     
