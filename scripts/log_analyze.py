@@ -59,7 +59,7 @@ BOT_PATTERN_FALLBACK = re.compile(
 )
 
 CENSUS_BOT_PATTERN = re.compile(
-    r'(censys|l9scan|zgrab|masscan|nmap|onyphe|cnsat|shadowserver|shodan|stretchoid|binaryedge|rapid7|leakix|fofa|internet-measurement|project25499|expanseinc|criminalip|zoomseye|netmap|bitping|intrinsec|securitytrails|panthera)',
+    r'(censys|l9scan|zgrab|masscan|nmap|onyphe|cnsat|shadowserver|shodan|stretchoid|binaryedge|rapid7|leakix|fofa|internet-measurement|project25499|expanseinc|criminalip|zoomseye|netmap|bitping|intrinsec|securitytrails|panthera|probe\.)',
     re.IGNORECASE
 )
 
