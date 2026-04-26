@@ -68,6 +68,19 @@ MALICIOUS_PATHS_FALLBACK = re.compile(
     re.IGNORECASE
 )
 
+# Paths served by the tarpit (nginx-exploit-paths.conf returns 200 to these).
+# A 200 on a tarpit path = scanner engaged with the honeypot.
+TARPIT_PATHS = re.compile(
+    r'^/(wp-admin|wp-login|wp-content|wp-json|wp-includes|wordpress|xmlrpc\.php'
+    r'|\.(env|git|streamlit)'
+    r'|cgi-bin|HNAP|SDK|sdk|hudson|swagger\.json'
+    r'|admin|login|dashboard|user|developmentserver|luci'
+    r'|evox|nmaplowercheck'
+    r'|phpmyadmin|pma|xampp|_vti_bin|manager/html|muieblackcat'
+    r'|ecp/)',
+    re.IGNORECASE
+)
+
 # Hyperscale Cloud Providers
 CLOUD_PATTERN = re.compile(
     r'(amazon|aws|google cloud|googleusercontent|microsoft|azure|oracle|ibm|softlayer|alibaba|aliyun|tencent|baidu|fastly|stackpath)',
@@ -768,18 +781,24 @@ def analyze(top_paths=10):
                     if c_code not in country_ips:
                         country_ips[c_code] = { 'legit': set(), 'bots': set(), 'malicious': set(), 'name': ip_cache[origin_ip]['country'] or 'Unknown' }
                     
+                    is_tarpited = (status == 200 and not ip_cache[origin_ip]["is_bot"] and bool(TARPIT_PATHS.search(path)))
                     is_census_bot = bool(CENSUS_BOT_PATTERN.search(data['agent'])) or \
                                     bool(CENSUS_BOT_PATTERN.search(ip_cache[origin_ip]['hostname'] or ''))
 
                     is_malicious = (status >= 400 and not ip_cache[origin_ip]['is_bot']) or \
                                   (status >= 400 and is_malicious_path_match(path, malicious_literal_paths, malicious_regex_paths)) or \
                                   (status >= 400 and bool(MALICIOUS_PATHS_FALLBACK.search(path))) or \
+                                  is_tarpited or \
                                   (c_code in ['RU', 'BY']) or \
                                   is_census_bot
                     
                     if is_malicious: 
                         country_ips[c_code]['malicious'].add(origin_ip)
                         s['is_malicious'] = True
+                        if is_tarpited:
+                            s['intent'] = "Tarpited Scanner"
+                            s['tarpited'] = True
+                            if "tarpited" not in s['tags']: s['tags'].append("tarpited")
                         if is_census_bot:
                             s['intent'] = "Census Scanner"
                             if "internet census" not in s['tags']:

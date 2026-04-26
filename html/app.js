@@ -348,6 +348,8 @@ function updateMarkers() {
                 <div style="margin-top: 5px; border-top: 1px solid rgba(255,255,255,0.1); padding-top: 5px;">
                     Intent: <span style="color: ${color}">${s.intent}</span><br>
                     Hits: ${s.req_count} | Rate: ${s.req_rate} RPS
+                    ${s.is_malicious && s.tags && s.tags.length ? '<br><div style="margin-top:4px;">' + s.tags.map(t => `<span style="background:rgba(244,63,94,0.2);color:#f43f5e;padding:1px 4px;border-radius:2px;font-size:0.6rem;font-weight:600;margin-right:2px;">${t}</span>`).join('') + '</div>' : ''}
+                    ${s.is_malicious && s.path_summary && s.path_summary.length ? '<br><div style="font-family:monospace;font-size:0.6rem;color:#f43f5e;margin-top:3px;max-width:200px;">' + s.path_summary.slice(0,3).join('<br>') + (s.path_summary.length > 3 ? '<br>+' + (s.path_summary.length - 3) + ' more' : '') + '</div>' : ''}
                 </div>
             </div>
         `;
@@ -818,6 +820,14 @@ function updateLogFeed() {
             ? ` <span style="background: #f43f5e; color: #fff; padding: 0 3px; border-radius: 2px; font-size: 0.6rem; font-weight: 700; letter-spacing: 0.05em;">${isCountryBlocked ? 'GEO-BLK' : 'IP-BLK'}</span>`
             : '';
 
+        const tags = (s.tags || []).filter(Boolean);
+        const evidenceCell = isMalBlocked
+            ? tags.map(t => `<span style="display:inline-block;background:rgba(244,63,94,0.15);color:#f43f5e;padding:1px 5px;border-radius:3px;font-size:0.6rem;font-weight:600;margin:1px 2px 1px 0;white-space:nowrap;">${t}</span>`).join('')
+            : '<span class="badge" style="background: rgba(255,255,255,0.05)">Cluster</span>';
+        const probePathsHtml = isMalBlocked
+            ? s.path_summary.slice(0, 4).map(p => `<div style="font-family:monospace;font-size:0.65rem;color:#f43f5e;opacity:0.85;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:220px;" title="${p}">${p}</div>`).join('')
+                + (s.path_summary.length > 4 ? `<div style="font-size:0.6rem;color:var(--text-secondary);opacity:0.6">+${s.path_summary.length - 4} more paths</div>` : '')
+            : `<span title="${s.path_summary.join(', ')}">${s.path_summary[0] || '/'}${s.path_summary.length > 1 ? ' (+'+(s.path_summary.length-1)+')' : ''}</span>`;
         tr.innerHTML = `
             <td>
                 <div style="font-weight: 600; color: ${color}">
@@ -826,8 +836,8 @@ function updateLogFeed() {
                 </div>
                 <div style="font-size: 0.7rem; color: var(--text-secondary)">${s.intent} | RPS: ${s.req_rate}</div>
             </td>
-            <td><span class="badge" style="background: rgba(255,255,255,0.05)">Cluster</span></td>
-            <td title="${s.path_summary.join(', ')}">${s.path_summary[0] || '/'} ${s.path_summary.length > 1 ? '(+'+(s.path_summary.length-1)+')' : ''}</td>
+            <td style="min-width:110px;vertical-align:top;">${evidenceCell}</td>
+            <td style="vertical-align:top;">${probePathsHtml}</td>
             <td><span style="color: ${ttype === 'malicious' ? '#f43f5e' : '#10b981'}">${s.req_count} reqs</span></td>
             <td style="color: var(--text-secondary); white-space: nowrap;">${s.last_seen_iso.replace('T', ' ').split('.')[0]}</td>
         `;

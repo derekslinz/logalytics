@@ -210,6 +210,8 @@ for s in data.get('sessions', []):
         continue
     if is_safe_ip(ip):
         continue
+    if s.get('is_bot', False):
+        continue  # verified/known bot — never ban or report
     # Check rDNS hostname for known scanners
     hostname = (s.get('geo', {}).get('hostname') or '').lower()
     if any(scanner in hostname for scanner in SCANNER_RDNS):
@@ -220,6 +222,8 @@ for s in data.get('sessions', []):
     if cc in BLOCKED_COUNTRIES:
         mark_block(ip, 'blocked_country', f'country={cc}')
         continue
+    if s.get('tarpited', False):
+        continue  # tarpited — scanner is engaged, do not ban or report
     if s.get('is_malicious', False):
         reason, evidence, suspicious = derive_session_evidence(s)
         if reason and evidence:
