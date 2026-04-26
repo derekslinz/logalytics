@@ -8,13 +8,13 @@ echo "=== Creating ipsets ==="
 
 # Individual abusive IPs (hash:ip for exact match)
 ipset list abusive_ips >/dev/null 2>&1 || {
-    ipset create abusive_ips hash:ip hashsize 8192 maxelem 65536
+    ipset create abusive_ips hash:ip hashsize 8192 maxelem 65536 timeout 2147483
     echo "Created abusive_ips (hash:ip)"
 }
 
 # Scanner network CIDR ranges (hash:net for prefix match)
 ipset list scanner_nets >/dev/null 2>&1 || {
-    ipset create scanner_nets hash:net hashsize 1024 maxelem 65536
+    ipset create scanner_nets hash:net hashsize 1024 maxelem 65536 timeout 2147483
     echo "Created scanner_nets (hash:net)"
 }
 

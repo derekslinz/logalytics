@@ -59,6 +59,46 @@ if [ -f "$ABUSEIPDB_KEY_FILE" ]; then
     export ABUSEIPDB_KEY=$(cat "$ABUSEIPDB_KEY_FILE" | tr -d '[:space:]')
 fi
 
+# ── 90-day TTL expiry ──────────────────────────────────────────────────────
+python3 - "$BLOCK_HISTORY_FILE" "$IPSET_ABUSIVE" <<'EXEOF'
+import json, sys, subprocess, os
+from datetime import datetime, timezone, timedelta
+
+history_file, ipset_name = sys.argv[1], sys.argv[2]
+TTL_DAYS = 90
+cutoff = datetime.now(timezone.utc) - timedelta(days=TTL_DAYS)
+
+if not os.path.exists(history_file):
+    sys.exit(0)
+try:
+    with open(history_file) as f:
+        history = json.load(f)
+except Exception:
+    sys.exit(0)
+if not isinstance(history, dict):
+    sys.exit(0)
+
+expired = []
+for ip, meta in list(history.items()):
+    ts = meta.get('banned_at') or meta.get('timestamp') or meta.get('first_seen')
+    if not ts:
+        continue
+    try:
+        if datetime.fromisoformat(ts.replace('Z', '+00:00')) < cutoff:
+            expired.append(ip)
+    except Exception:
+        continue
+
+for ip in expired:
+    subprocess.run(['ipset', 'del', ipset_name, ip], capture_output=True)
+    del history[ip]
+
+if expired:
+    with open(history_file, 'w') as f:
+        json.dump(history, f, indent=2)
+    print(f'[ttl-expiry] Purged {len(expired)} entries older than {TTL_DAYS} days')
+EXEOF
+
 RESULTS=$(python3 - "$DATA_JSON" "$IPSET_ABUSIVE" "$IPSET_SCANNERS" <<'PYEOF'
 import json, re, sys, subprocess, ipaddress, os, tempfile, time
 from datetime import datetime, timezone
@@ -277,7 +317,7 @@ for ip in new_abusive:
     reason_info = block_reasons.get(ip, {'reason': 'unknown', 'evidence': []})
     evidence_str = ' | '.join(reason_info.get('evidence', [])[:3]) if reason_info.get('evidence') else ''
     log_ip_block(ip, reason_info.get('reason', 'unknown'), evidence_str)
-    subprocess.run(['ipset', 'add', ipset_abusive, ip], capture_output=True)
+    subprocess.run(['ipset', 'add', ipset_abusive, ip, 'timeout', '7776000'], capture_output=True)
 
 # Ensure safe IPs are never blocked (remove from sets if present)
 for ip in SAFE_IPS:
@@ -339,7 +379,7 @@ for ip in scanner_ips:
     r = subprocess.run(['ipset', 'test', ipset_scanners, ip], capture_output=True)
     if r.returncode != 0:
         log_ip_block(ip, 'scanner_detection', 'known_scanner_rdns')
-        subprocess.run(['ipset', 'add', ipset_scanners, ip], capture_output=True)
+        subprocess.run(['ipset', 'add', ipset_scanners, ip, 'timeout', '7776000'], capture_output=True)
         new_scanner += 1
 
 # Write reportable IPs (new ones only) to temp file for AbuseIPDB
