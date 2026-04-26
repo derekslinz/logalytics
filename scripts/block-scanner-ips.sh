@@ -96,7 +96,7 @@ SCANNER_RDNS = [
     'project25499.com', 'expanseinc.com', 'criminalip.com', 'zoomseye.org',
     'netmap.io', 'rwth-aachen.de', 'hurricanethreat.com', 'bitping.com',
     'intrinsec.com', 'securitytrails.com', 'panthera.network', 'leakix.com',
-    'fofa.info', 'fofa.so'
+    'fofa.info', 'fofa.so', 'onyphe.net', '.probe.'
 ]
 
 BLOCKED_COUNTRIES = set(os.environ.get('BLOCKED_COUNTRIES', '').split())
