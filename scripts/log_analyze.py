@@ -684,6 +684,7 @@ def analyze(top_paths=10):
                             origin_ip = data['ip']
                     
                     if not is_valid_ip(origin_ip) or origin_ip == '127.0.0.1' or origin_ip == OWNER_IP: continue
+                    if is_cloudflare(origin_ip): continue  # edge proxy fallback — not a real actor
                     edge_ip = data['edge_ip']
 
 

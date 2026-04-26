@@ -213,6 +213,8 @@ for s in data.get('sessions', []):
     if s.get('is_bot', False):
         continue  # verified/known bot — never ban or report
     # Check rDNS hostname for known scanners
+    if is_cloudflare(ip):
+        continue  # Cloudflare proxy — real client IP is in cf_ip field, not blockable at this layer
     hostname = (s.get('geo', {}).get('hostname') or '').lower()
     if any(scanner in hostname for scanner in SCANNER_RDNS):
         scanner_ips.add(ip)
