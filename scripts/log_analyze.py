@@ -19,6 +19,8 @@ LOG_GLOBS = ['/var/log/nginx/access.log*']
 MMDB_FILE = '/var/lib/GeoIP/GeoLite2-City.mmdb'
 ASN_MMDB_FILE = '/var/lib/GeoIP/GeoLite2-ASN.mmdb'
 # Set LOG_ANALYZER_OWNER_IP to exclude your own server's IP from analysis results.
+# When unset (empty string), no IP is skipped — the is_valid_ip guard ensures
+# an empty string never matches a real address.
 OWNER_IP = os.environ.get('LOG_ANALYZER_OWNER_IP', '')
 OUTPUT_FILES = [
     '/var/www/logalytics/html/data.json',
