@@ -216,18 +216,19 @@ for s in data.get('sessions', []):
         continue
     if s.get('geo', {}).get('is_bot', False) or s.get('geo', {}).get('is_verified_bot', False):
         continue  # verified/known bot — never ban or report
-    if is_cloudflare(ip):
-        continue  # Cloudflare proxy — real client IP is in cf_ip field, not blockable at this layer
     # Check rDNS hostname for known scanners
     hostname = (s.get('geo', {}).get('hostname') or '').lower()
     if any(scanner in hostname for scanner in SCANNER_RDNS):
         scanner_ips.add(ip)
         continue
-    # Block IPs from blocked countries (including Cloudflare-proxied)
+    # Block IPs from blocked countries; Cloudflare edge IPs are checked after so
+    # traffic from blocked-country Cloudflare nodes is still blocked.
     cc = s.get('geo', {}).get('country_code', '')
     if cc in BLOCKED_COUNTRIES:
         mark_block(ip, 'blocked_country', f'country={cc}')
         continue
+    if is_cloudflare(ip):
+        continue  # Cloudflare proxy — real client IP is in cf_ip field, not blockable at this layer
     if s.get('tarpited', False):
         continue  # tarpited — scanner is engaged, do not ban or report
     if s.get('is_malicious', False):
