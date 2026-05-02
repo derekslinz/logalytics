@@ -214,7 +214,7 @@ for s in data.get('sessions', []):
         continue
     if is_safe_ip(ip):
         continue
-    if s.get('is_bot', False):
+    if s.get('geo', {}).get('is_bot', False) or s.get('geo', {}).get('is_verified_bot', False):
         continue  # verified/known bot — never ban or report
     if is_cloudflare(ip):
         continue  # Cloudflare proxy — real client IP is in cf_ip field, not blockable at this layer
