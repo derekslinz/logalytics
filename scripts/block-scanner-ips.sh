@@ -463,7 +463,7 @@ fi
 
 # --- AbuseIPDB Reporting ---
 REPORT_FILE="/tmp/abuseipdb_report.json"
-if [ -f "$ABUSEIPDB_KEY_FILE" ] && [ -f "$REPORT_FILE" ] && [ "$NEW_REPORTABLE" -gt 0 ] 2>/dev/null; then
+if [ -s "$ABUSEIPDB_KEY_FILE" ] && [ -f "$REPORT_FILE" ] && [ "$NEW_REPORTABLE" -gt 0 ] 2>/dev/null; then
     REPORTED=0
 
     python3 - "$REPORT_FILE" "$ABUSEIPDB_KEY_FILE" "$ABUSEIPDB_LOG" <<'PYEOF'
@@ -475,6 +475,9 @@ try:
         api_key = _f.read().strip()
 except Exception:
     api_key = ''
+
+if not api_key:
+    sys.exit(0)
 
 # AbuseIPDB categories:
 # 14 = Port Scan, 21 = Web App Attack, 19 = Ping of Death (scanner)
