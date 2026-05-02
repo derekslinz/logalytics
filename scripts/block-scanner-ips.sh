@@ -15,6 +15,7 @@ ABUSEIPDB_KEY_FILE="${ABUSEIPDB_KEY_FILE:-/etc/abuseipdb.key}"
 ABUSEIPDB_LOG="${ABUSEIPDB_LOG:-/var/log/abuseipdb-reports.log}"
 CONFIG_JS="${CONFIG_JS:-$SCRIPT_DIR/../html/config.js}"
 IPTABLES_LOG="${IPTABLES_LOG:-/var/log/iptables-blocks.log}"
+BLOCK_HISTORY_FILE="${BLOCK_HISTORY_FILE:-/var/lib/log_analyzer/data/blocked_ips.json}"
 
 # Configurables via environment
 export ABUSE_SCORE_THRESHOLD="${ABUSE_SCORE_THRESHOLD:-75}"
@@ -53,11 +54,6 @@ EOF
 
 # Set up iptables logging rules if enabled
 setup_iptables_logging
-
-# Pass API key to Python via env
-if [ -f "$ABUSEIPDB_KEY_FILE" ]; then
-    export ABUSEIPDB_KEY=$(cat "$ABUSEIPDB_KEY_FILE" | tr -d '[:space:]')
-fi
 
 # ── 90-day TTL expiry ──────────────────────────────────────────────────────
 python3 - "$BLOCK_HISTORY_FILE" "$IPSET_ABUSIVE" <<'EXEOF'
@@ -106,12 +102,19 @@ import urllib.request, urllib.parse
 
 data_path, ipset_abusive, ipset_scanners = sys.argv[1], sys.argv[2], sys.argv[3]
 BLOCK_HISTORY_FILE = os.environ.get('BLOCK_HISTORY_FILE', '/var/lib/log_analyzer/data/blocked_ips.json')
-SAFE_IPS_RAW = os.environ.get('SAFE_IPS', '188.89.187.128')
+SAFE_IPS_RAW = os.environ.get('SAFE_IPS', '')
 IPTABLES_LOG_FILE = os.environ.get('IPTABLES_LOG', '/var/log/iptables-blocks.log')
 MAIN_LOG_FILE = os.environ.get('LOG', '/var/log/block-scanner-ips.log')
 ENABLE_IPTABLES_LOGGING = os.environ.get('ENABLE_IPTABLES_LOGGING', '1') == '1'
-# Configuration from environment
-ABUSEIPDB_KEY = os.environ.get('ABUSEIPDB_KEY', '')
+# Read AbuseIPDB key from file to avoid exposing it in the process environment
+_abuseipdb_key_file = os.environ.get('ABUSEIPDB_KEY_FILE', '/etc/abuseipdb.key')
+ABUSEIPDB_KEY = ''
+if _abuseipdb_key_file and os.path.isfile(_abuseipdb_key_file):
+    try:
+        with open(_abuseipdb_key_file) as _kf:
+            ABUSEIPDB_KEY = _kf.read().strip()
+    except Exception:
+        pass
 ABUSE_SCORE_THRESHOLD = int(os.environ.get('ABUSE_SCORE_THRESHOLD', 75))
 ABUSE_REPORT_THRESHOLD = int(os.environ.get('ABUSE_REPORT_THRESHOLD', 10))
 
@@ -416,13 +419,17 @@ fi
 # --- AbuseIPDB Reporting ---
 REPORT_FILE="/tmp/abuseipdb_report.json"
 if [ -f "$ABUSEIPDB_KEY_FILE" ] && [ -f "$REPORT_FILE" ] && [ "$NEW_REPORTABLE" -gt 0 ] 2>/dev/null; then
-    ABUSEIPDB_KEY=$(cat "$ABUSEIPDB_KEY_FILE")
     REPORTED=0
 
-    python3 - "$REPORT_FILE" "$ABUSEIPDB_KEY" "$ABUSEIPDB_LOG" <<'PYEOF'
+    python3 - "$REPORT_FILE" "$ABUSEIPDB_KEY_FILE" "$ABUSEIPDB_LOG" <<'PYEOF'
 import json, sys, urllib.request, urllib.parse, time
 
-report_file, api_key, log_file = sys.argv[1], sys.argv[2], sys.argv[3]
+report_file, api_key_file, log_file = sys.argv[1], sys.argv[2], sys.argv[3]
+try:
+    with open(api_key_file) as _f:
+        api_key = _f.read().strip()
+except Exception:
+    api_key = ''
 
 # AbuseIPDB categories:
 # 14 = Port Scan, 21 = Web App Attack, 19 = Ping of Death (scanner)

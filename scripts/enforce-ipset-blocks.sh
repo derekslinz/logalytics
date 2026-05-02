@@ -56,11 +56,6 @@ EOF
 # Set up iptables logging rules if enabled
 setup_iptables_logging
 
-# Pass API key to Python via env
-if [ -f "$ABUSEIPDB_KEY_FILE" ]; then
-    export ABUSEIPDB_KEY=$(cat "$ABUSEIPDB_KEY_FILE" | tr -d '[:space:]')
-fi
-
 RESULTS=$(python3 - "$DATA_JSON" "$IPSET_ABUSIVE" "$IPSET_SCANNERS" <<'PYEOF'
 import json, re, sys, subprocess, ipaddress, os, tempfile, time
 from datetime import datetime, timezone
@@ -68,12 +63,19 @@ import urllib.request, urllib.parse
 
 data_path, ipset_abusive, ipset_scanners = sys.argv[1], sys.argv[2], sys.argv[3]
 BLOCK_HISTORY_FILE = os.environ.get('BLOCK_HISTORY_FILE', '/var/lib/log_analyzer/data/blocked_ips.json')
-SAFE_IPS_RAW = os.environ.get('SAFE_IPS', '188.89.187.128')
+SAFE_IPS_RAW = os.environ.get('SAFE_IPS', '')
 IPTABLES_LOG_FILE = os.environ.get('IPTABLES_LOG', '/var/log/iptables-blocks.log')
 MAIN_LOG_FILE = os.environ.get('LOG', '/var/log/enforce-ipset-blocks.log')
 ENABLE_IPTABLES_LOGGING = os.environ.get('ENABLE_IPTABLES_LOGGING', '1') == '1'
-# Configuration from environment
-ABUSEIPDB_KEY = os.environ.get('ABUSEIPDB_KEY', '')
+# Read AbuseIPDB key from file to avoid exposing it in the process environment
+_abuseipdb_key_file = os.environ.get('ABUSEIPDB_KEY_FILE', '/etc/abuseipdb.key')
+ABUSEIPDB_KEY = ''
+if _abuseipdb_key_file and os.path.isfile(_abuseipdb_key_file):
+    try:
+        with open(_abuseipdb_key_file) as _kf:
+            ABUSEIPDB_KEY = _kf.read().strip()
+    except Exception:
+        pass
 ABUSE_SCORE_THRESHOLD = int(os.environ.get('ABUSE_SCORE_THRESHOLD', 75))
 ABUSE_REPORT_THRESHOLD = int(os.environ.get('ABUSE_REPORT_THRESHOLD', 10))
 
@@ -87,7 +89,7 @@ MALICIOUS_PATHS = [
     r'/evox/', r'/nmaplowercheck',
     r'/developmentserver/', r'/luci/',
     r'/phpmyadmin', r'/pma/', r'/xampp/', r'/_vti_bin/', r'/manager/html', r'/muieblackcat',
-    r'\.php$',
+    r'\.php$', r'/ecp/',
 ]
 SAFE_PATHS = [r'/send_mail\.php', r'/favicon', r'/robots\.txt', r'/sitemap\.xml']
 
@@ -212,6 +214,10 @@ for s in data.get('sessions', []):
         continue
     if is_safe_ip(ip):
         continue
+    if s.get('is_bot', False):
+        continue  # verified/known bot — never ban or report
+    if is_cloudflare(ip):
+        continue  # Cloudflare proxy — real client IP is in cf_ip field, not blockable at this layer
     # Check rDNS hostname for known scanners
     hostname = (s.get('geo', {}).get('hostname') or '').lower()
     if any(scanner in hostname for scanner in SCANNER_RDNS):
@@ -222,6 +228,8 @@ for s in data.get('sessions', []):
     if cc in BLOCKED_COUNTRIES:
         mark_block(ip, 'blocked_country', f'country={cc}')
         continue
+    if s.get('tarpited', False):
+        continue  # tarpited — scanner is engaged, do not ban or report
     if s.get('is_malicious', False):
         reason, evidence, suspicious = derive_session_evidence(s)
         if reason and evidence:
@@ -372,13 +380,17 @@ fi
 # --- AbuseIPDB Reporting ---
 REPORT_FILE="/tmp/abuseipdb_report.json"
 if [ -f "$ABUSEIPDB_KEY_FILE" ] && [ -f "$REPORT_FILE" ] && [ "$NEW_REPORTABLE" -gt 0 ] 2>/dev/null; then
-    ABUSEIPDB_KEY=$(cat "$ABUSEIPDB_KEY_FILE")
     REPORTED=0
 
-    python3 - "$REPORT_FILE" "$ABUSEIPDB_KEY" "$ABUSEIPDB_LOG" <<'PYEOF'
+    python3 - "$REPORT_FILE" "$ABUSEIPDB_KEY_FILE" "$ABUSEIPDB_LOG" <<'PYEOF'
 import json, sys, urllib.request, urllib.parse, time
 
-report_file, api_key, log_file = sys.argv[1], sys.argv[2], sys.argv[3]
+report_file, api_key_file, log_file = sys.argv[1], sys.argv[2], sys.argv[3]
+try:
+    with open(api_key_file) as _f:
+        api_key = _f.read().strip()
+except Exception:
+    api_key = ''
 
 # AbuseIPDB categories:
 # 14 = Port Scan, 21 = Web App Attack, 19 = Ping of Death (scanner)

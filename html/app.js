@@ -279,11 +279,12 @@ function setupCharts() {
 }
 
 function sessionMatchesCurrentFilter(s) {
-    if (currentFilter === 'legitimate') return !s.geo.is_bot && !s.is_malicious && !s.geo.is_cloud && !s.geo.is_hosting;
-    if (currentFilter === 'cloud') return s.geo.is_cloud && !s.is_bot && !s.is_malicious;
-    if (currentFilter === 'hosting') return s.geo.is_hosting && !s.is_bot && !s.is_malicious;
-    if (currentFilter === 'bots') return s.geo.is_bot;
-    if (currentFilter === 'malicious') return s.is_malicious;
+    const ttype = getTrafficType(s);
+    if (currentFilter === 'legitimate') return ttype === 'legit';
+    if (currentFilter === 'cloud') return ttype === 'cloud';
+    if (currentFilter === 'hosting') return ttype === 'hosting';
+    if (currentFilter === 'bots') return ttype === 'bot';
+    if (currentFilter === 'malicious') return ttype === 'malicious';
     return true;
 }
 
@@ -1069,7 +1070,8 @@ function updateTopPaths() {
     const tableDiv = document.getElementById('top-paths');
     if (!tableDiv) return;
 
-    const entries = getTopPathEntries().slice(0, 50);
+    const allEntries = getTopPathEntries();
+    const entries = allEntries.slice(0, 50);
 
     let html = '<table style="width: 100%; border-collapse: collapse;">';
     entries.forEach(({ path, count, ipCount }) => {
@@ -1082,11 +1084,13 @@ function updateTopPaths() {
         `;
     });
     html += '</table>';
-    
+
     if (entries.length === 0) {
         html = '<div style="font-size: 0.75rem; color: var(--text-secondary); text-align: center; padding: 1rem 0;">No scanner paths found</div>';
+    } else if (allEntries.length > 50) {
+        html += `<div style="font-size: 0.7rem; color: var(--text-secondary); text-align: center; padding: 4px 0;">+${allEntries.length - 50} more — see full report</div>`;
     }
-    
+
     tableDiv.innerHTML = html;
 }
 
@@ -1423,7 +1427,13 @@ function togglePlay() {
         document.getElementById('btn-play').innerHTML = '<i data-lucide="pause" style="width: 14px; height: 14px;"></i>';
         playInterval = setInterval(() => {
             const slider = document.getElementById('timeline-slider');
-            slider.value = (parseInt(slider.value) + 1) % 101;
+            const next = parseInt(slider.value) + 1;
+            if (next > 100) {
+                slider.value = 100;
+                togglePlay();
+            } else {
+                slider.value = next;
+            }
             updateDashboard();
         }, 200);
     } else {
