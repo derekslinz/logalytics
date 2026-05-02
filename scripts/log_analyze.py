@@ -12,14 +12,18 @@ import time
 import argparse
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
+from collections import Counter
 
 LOG_FILES = ['/var/log/nginx/access.log', '/var/log/nginx/access.log.1']
 LOG_GLOBS = ['/var/log/nginx/access.log*']
 MMDB_FILE = '/var/lib/GeoIP/GeoLite2-City.mmdb'
 ASN_MMDB_FILE = '/var/lib/GeoIP/GeoLite2-ASN.mmdb'
-OWNER_IP = os.environ.get('OWNER_IP', '127.0.0.1')
+# Set LOG_ANALYZER_OWNER_IP to exclude your own server's IP from analysis results.
+# When unset (empty string), no IP is skipped — the is_valid_ip guard ensures
+# an empty string never matches a real address.
+OWNER_IP = os.environ.get('LOG_ANALYZER_OWNER_IP', '')
 OUTPUT_FILES = [
-    '/var/www/logalytics/html/data.json'
+    '/var/www/logalytics/html/data.json',
 ]
 
 def is_valid_ip(ip):
@@ -434,7 +438,7 @@ def is_notable(hostname, asn_name, asn_num, is_verified_bot):
     if any(k in combined for k in isp_keywords): return False, None
 
     # Hosting Provider Labeling (Attribution Hygiene)
-    is_hosting = any(k in combined for k in HOSTING_PATTERN.pattern.split('|')) or \
+    is_hosting = bool(HOSTING_PATTERN.search(combined)) or \
                  (asn_num in HOSTING_ASNS) or (asn_num in CLOUD_ASNS)
     
     if is_hosting and not is_verified_bot:
@@ -785,12 +789,13 @@ def analyze(top_paths=10):
                     is_census_bot = bool(CENSUS_BOT_PATTERN.search(data['agent'])) or \
                                     bool(CENSUS_BOT_PATTERN.search(ip_cache[origin_ip]['hostname'] or ''))
 
-                    is_malicious = (status >= 400 and not ip_cache[origin_ip]['is_bot']) or \
-                                  (status >= 400 and is_malicious_path_match(path, malicious_literal_paths, malicious_regex_paths)) or \
-                                  (status >= 400 and bool(MALICIOUS_PATHS_FALLBACK.search(path))) or \
-                                  is_tarpited or \
-                                  (c_code in ['RU', 'BY']) or \
-                                  is_census_bot
+                    is_malicious = (status >= 400 and not ip_cache[origin_ip]['is_bot'] and (
+                                        is_malicious_path_match(path, malicious_literal_paths, malicious_regex_paths) or
+                                        bool(MALICIOUS_PATHS_FALLBACK.search(path))
+                                    )) or \
+                                   is_tarpited or \
+                                   (c_code in ['RU', 'BY']) or \
+                                   is_census_bot
                     
                     if is_malicious: 
                         country_ips[c_code]['malicious'].add(origin_ip)
@@ -831,7 +836,7 @@ def analyze(top_paths=10):
         s['is_spike'] = s['req_rate'] > 5.0
         s['first_seen_iso'] = datetime.fromtimestamp(s['first_seen']).isoformat()
         s['last_seen_iso'] = datetime.fromtimestamp(s['last_seen']).isoformat()
-        s['path_summary'] = list(set(r['path'] for r in s['requests'][-10:]))
+        s['path_summary'] = [path for path, _ in Counter(r['path'] for r in s['requests']).most_common(10)]
         del s['requests']
         final_sessions.append(s)
 
