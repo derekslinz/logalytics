@@ -12,6 +12,7 @@ import time
 import argparse
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
+import ipaddress
 
 LOG_FILES = ['/var/log/nginx/access.log', '/var/log/nginx/access.log.1']
 LOG_GLOBS = ['/var/log/nginx/access.log*']
@@ -32,6 +33,27 @@ def is_valid_ip(ip):
             return True
         except socket.error:
             return False
+
+CLOUDFLARE_V4 = [
+    "173.245.48.0/20", "103.21.244.0/22", "103.22.200.0/22",
+    "103.31.4.0/22", "141.101.64.0/18", "108.162.192.0/18",
+    "190.93.240.0/20", "188.114.96.0/20", "197.234.240.0/22",
+    "198.41.128.0/17", "162.158.0.0/15", "104.16.0.0/13",
+    "104.24.0.0/14", "172.64.0.0/13", "131.0.72.0/22"
+]
+CLOUDFLARE_V6 = [
+    "2400:cb00::/32", "2606:4700::/32", "2803:f800::/32",
+    "2405:b500::/32", "2405:8100::/32", "2a06:98c0::/29",
+    "2c0f:f248::/32"
+]
+CF_NETWORKS = [ipaddress.ip_network(n) for n in CLOUDFLARE_V4 + CLOUDFLARE_V6]
+
+def is_cloudflare(ip_str):
+    try:
+        ip = ipaddress.ip_address(ip_str)
+        return any(ip in net for net in CF_NETWORKS)
+    except ValueError:
+        return False
 
 DATA_DIR = '/var/lib/log_analyzer/data'
 
