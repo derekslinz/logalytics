@@ -17,10 +17,9 @@ LOG_FILES = ['/var/log/nginx/access.log', '/var/log/nginx/access.log.1']
 LOG_GLOBS = ['/var/log/nginx/access.log*']
 MMDB_FILE = '/var/lib/GeoIP/GeoLite2-City.mmdb'
 ASN_MMDB_FILE = '/var/lib/GeoIP/GeoLite2-ASN.mmdb'
-OWNER_IP = '188.89.187.128'
+OWNER_IP = os.environ.get('OWNER_IP', '127.0.0.1')
 OUTPUT_FILES = [
-    '/var/www/logalytics/html/data.json',
-    '/root/.gemini/antigravity/scratch/log_analyzer/web/data.json'
+    '/var/www/logalytics/html/data.json'
 ]
 
 def is_valid_ip(ip):

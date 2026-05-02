@@ -68,7 +68,7 @@ import urllib.request, urllib.parse
 
 data_path, ipset_abusive, ipset_scanners = sys.argv[1], sys.argv[2], sys.argv[3]
 BLOCK_HISTORY_FILE = os.environ.get('BLOCK_HISTORY_FILE', '/var/lib/log_analyzer/data/blocked_ips.json')
-SAFE_IPS_RAW = os.environ.get('SAFE_IPS', '188.89.187.128')
+SAFE_IPS_RAW = os.environ.get('SAFE_IPS', '')
 IPTABLES_LOG_FILE = os.environ.get('IPTABLES_LOG', '/var/log/iptables-blocks.log')
 MAIN_LOG_FILE = os.environ.get('LOG', '/var/log/enforce-ipset-blocks.log')
 ENABLE_IPTABLES_LOGGING = os.environ.get('ENABLE_IPTABLES_LOGGING', '1') == '1'
