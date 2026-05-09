@@ -214,8 +214,8 @@ for s in data.get('sessions', []):
         continue
     if is_safe_ip(ip):
         continue
-    if s.get('geo', {}).get('is_bot', False) or s.get('geo', {}).get('is_verified_bot', False):
-        continue  # verified/known bot — never ban or report
+    if s.get('geo', {}).get('is_verified_bot', False):
+        continue  # verified bot (FCrDNS confirmed) — never ban or report
     # Check rDNS hostname for known scanners
     hostname = (s.get('geo', {}).get('hostname') or '').lower()
     if any(scanner in hostname for scanner in SCANNER_RDNS):
