@@ -507,13 +507,15 @@ def open_log_file(path):
         return gzip.open(path, 'rt', encoding='utf-8', errors='replace')
     return open(path, 'r', encoding='utf-8', errors='replace')
 
-def discover_log_files():
-    discovered = set(LOG_FILES)
-    for pattern in LOG_GLOBS:
-        for p in glob.glob(pattern):
-            discovered.add(p)
-
-    existing = [p for p in discovered if os.path.exists(p)]
+def discover_log_files(incremental=False):
+    if incremental:
+        existing = [p for p in LOG_FILES if os.path.exists(p)]
+    else:
+        discovered = set(LOG_FILES)
+        for pattern in LOG_GLOBS:
+            for p in glob.glob(pattern):
+                discovered.add(p)
+        existing = [p for p in discovered if os.path.exists(p)]
 
     def log_sort_key(path):
         if path.endswith('access.log'):
@@ -523,7 +525,7 @@ def discover_log_files():
             return int(m.group(1))
         return 10_000
 
-    return sorted(existing, key=log_sort_key)
+    return sorted(existing, key=log_sort_key, reverse=True)
 
 def progress(stage, current=None, total=None, extra=''):
     if not PROGRESS_ENABLED:
@@ -634,21 +636,41 @@ def analyze(top_paths=10):
     block_history = load_block_history()
     dns_cache = load_dns_cache()
     progress('Loaded persistent DNS cache', len(dns_cache))
-    
+
+    import pickle
+    state_file = os.path.join(DATA_DIR, 'analyzer_state.pkl')
+    state = None
+    if os.path.exists(state_file):
+        try:
+            with open(state_file, 'rb') as f:
+                state = pickle.load(f)
+        except Exception as e:
+            print(f"Warning: Could not load state: {e}")
+
+    is_incremental = state is not None
+    if state:
+        sessions = state.get('sessions', {})
+        ip_cache = state.get('ip_cache', {})
+        malicious_path_stats = state.get('malicious_path_stats', {})
+        non_malicious_path_stats = state.get('non_malicious_path_stats', {})
+        log_offsets = state.get('log_offsets', {})
+    else:
+        sessions = {}
+        ip_cache = {}
+        malicious_path_stats = {}
+        non_malicious_path_stats = {}
+        log_offsets = {}
+
     city_reader = None
     asn_reader = None
-    ip_cache = {}
     country_ips = {}
-    sessions = {}
-    malicious_path_stats = {}
-    non_malicious_path_stats = {}
 
     try:
         city_reader = maxminddb.open_database(MMDB_FILE)
         asn_reader = maxminddb.open_database(ASN_MMDB_FILE)
         progress('Opened GeoIP databases')
 
-        active_logs = discover_log_files()
+        active_logs = discover_log_files(incremental=is_incremental)
         if not active_logs:
             progress('No active log files found')
             return
@@ -657,14 +679,23 @@ def analyze(top_paths=10):
 
         # Seed in-run cache from persistent DNS cache
         for ip, entry in dns_cache.items():
-            ip_cache[ip] = {'hostname': entry.get('hostname'), 'partial': True}
+            if ip not in ip_cache:
+                ip_cache[ip] = {'hostname': entry.get('hostname'), 'partial': True}
         progress('Seeded in-memory cache from persistent DNS cache', len(ip_cache))
 
         # Pre-pass for IP discovery
         new_ips = set()
         for idx, log_file in enumerate(active_logs, 1):
+            stat = os.stat(log_file)
+            inode = stat.st_ino
+            current_size = stat.st_size
+            last_offset = log_offsets.get(inode, 0)
+            if current_size < last_offset: last_offset = 0
+            if current_size == last_offset: continue
+
             progress('Pre-scan log file', idx, len(active_logs), os.path.basename(log_file))
             with open_log_file(log_file) as f:
+                if last_offset > 0: f.seek(last_offset)
                 for line_no, line in enumerate(f, 1):
                     match = LOG_PATTERN.match(line)
                     if match:
@@ -674,7 +705,6 @@ def analyze(top_paths=10):
                         progress('Pre-scan progress', line_no, extra=os.path.basename(log_file))
 
         progress('Pre-scan complete', len(new_ips), extra='unique IPs queued for rDNS')
-
 
         # Parallel DNS
         if new_ips:
@@ -691,8 +721,16 @@ def analyze(top_paths=10):
 
         total_processed_lines = 0
         for idx, log_file in enumerate(active_logs, 1):
-            progress('Processing log file', idx, len(active_logs), os.path.basename(log_file))
+            stat = os.stat(log_file)
+            inode = stat.st_ino
+            current_size = stat.st_size
+            last_offset = log_offsets.get(inode, 0)
+            if current_size < last_offset: last_offset = 0
+            if current_size == last_offset: continue
+
+            progress('Processing log file', idx, len(active_logs), f"{os.path.basename(log_file)} (offset {last_offset})")
             with open_log_file(log_file) as f:
+                if last_offset > 0: f.seek(last_offset)
                 for line_no, line in enumerate(f, 1):
                     total_processed_lines += 1
                     match = LOG_PATTERN.match(line)
@@ -776,6 +814,7 @@ def analyze(top_paths=10):
                         }
                     
                     s = sessions[s_key]
+                    if 'requests' not in s: s['requests'] = []
                     s['requests'].append({'time': ts, 'path': sanitize(path), 'status': status})
                     if 200 <= status < 300:
                         s['status_counts']['2xx'] += 1
@@ -839,6 +878,7 @@ def analyze(top_paths=10):
                             total_processed_lines,
                             extra=f"sessions={len(sessions)}, ips={len(ip_cache)}, file={os.path.basename(log_file)}"
                         )
+                log_offsets[inode] = f.tell()
 
     except Exception as e:
         print(f"Error during analysis: {e}")
@@ -853,14 +893,44 @@ def analyze(top_paths=10):
     final_sessions = []
     for s in sessions.values():
         dur = max(1, s['last_seen'] - s['first_seen'])
-        s['req_count'] = len(s['requests'])
+        new_req_count = len(s.get('requests', []))
+        s['req_count'] = s.get('req_count', 0) + new_req_count
         s['req_rate'] = round(s['req_count'] / dur, 3) 
         s['is_spike'] = s['req_rate'] > 5.0
         s['first_seen_iso'] = datetime.fromtimestamp(s['first_seen']).isoformat()
         s['last_seen_iso'] = datetime.fromtimestamp(s['last_seen']).isoformat()
-        s['path_summary'] = [path for path, _ in Counter(r['path'] for r in s['requests']).most_common(10)]
-        del s['requests']
+        
+        if new_req_count > 0:
+            new_paths = [r['path'] for r in s.get('requests', [])]
+            old_paths = s.get('path_summary', [])
+            merged = []
+            seen = set()
+            for p in new_paths + old_paths:
+                if p not in seen:
+                    seen.add(p)
+                    merged.append(p)
+            s['path_summary'] = merged[:10]
+            
+        if 'requests' in s:
+            del s['requests']
         final_sessions.append(s)
+
+    try:
+        os.makedirs(os.path.dirname(state_file), exist_ok=True)
+        cutoff = int(time.time()) - (30 * 86400)
+        pruned_sessions = {k: v for k, v in sessions.items() if v.get('last_seen', 0) >= cutoff}
+        active_ips = {v['origin_ip'] for v in pruned_sessions.values()}
+        pruned_ip_cache = {k: v for k, v in ip_cache.items() if k in active_ips}
+        with open(state_file, 'wb') as f:
+            pickle.dump({
+                'sessions': pruned_sessions,
+                'ip_cache': pruned_ip_cache,
+                'malicious_path_stats': malicious_path_stats,
+                'non_malicious_path_stats': non_malicious_path_stats,
+                'log_offsets': log_offsets
+            }, f)
+    except Exception as e:
+        print(f"Warning: Could not save state: {e}")
 
     final_sessions.sort(key=lambda x: x['last_seen'], reverse=True)
     progress('Sessions finalized', len(final_sessions))
