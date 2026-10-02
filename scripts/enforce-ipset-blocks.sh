@@ -24,6 +24,27 @@ export ABUSE_REPORT_THRESHOLD="${ABUSE_REPORT_THRESHOLD:-10}"
 export BLOCKED_COUNTRIES="${BLOCKED_COUNTRIES:-RU BY KZ BR IN CN PH ID IR KP VN NG}"
 export ENABLE_IPTABLES_LOGGING="${ENABLE_IPTABLES_LOGGING:-1}"
 
+# Log any unhandled failure instead of dying silently under cron.
+# Without this, `set -e` aborts before $LOG is ever written and the job
+# looks like it simply stopped.
+trap 'echo "$(date -Iseconds) FATAL: aborted at line $LINENO (exit $?)" >> "$LOG"' ERR
+
+# Helper to (re)create the ipsets this script depends on.
+# ipsets are kernel state and are lost on reboot; if they are missing the
+# later `ipset save` calls abort the whole run under `set -e`, which
+# silently kills AbuseIPDB reporting. Recreate them up front instead.
+ensure_ipsets() {
+    command -v ipset >/dev/null 2>&1 || return 0
+    ipset list "$IPSET_ABUSIVE" >/dev/null 2>&1 || {
+        ipset create "$IPSET_ABUSIVE" hash:ip hashsize 8192 maxelem 65536 timeout 2147483
+        echo "$(date -Iseconds) Recreated ipset $IPSET_ABUSIVE" >> "$LOG"
+    }
+    ipset list "$IPSET_SCANNERS" >/dev/null 2>&1 || {
+        ipset create "$IPSET_SCANNERS" hash:net hashsize 1024 maxelem 65536 timeout 2147483
+        echo "$(date -Iseconds) Recreated ipset $IPSET_SCANNERS" >> "$LOG"
+    }
+}
+
 # Helper function to ensure iptables rules exist with logging
 setup_iptables_logging() {
     # Only run if logging is enabled and iptables is available
@@ -55,6 +76,9 @@ EOF
 
 # Set up iptables logging rules if enabled
 setup_iptables_logging
+
+# Recreate the ipsets if a reboot (or anything else) wiped them
+ensure_ipsets
 
 RESULTS=$(python3 - "$DATA_JSON" "$IPSET_ABUSIVE" "$IPSET_SCANNERS" <<'PYEOF'
 import json, re, sys, subprocess, ipaddress, os, tempfile, time
@@ -363,12 +387,16 @@ NEW_REPORTABLE=$(echo "$RESULTS" | awk '{print $3}')
 ABUSE_CHECKED=$(echo "$RESULTS" | awk '{print $4}')
 
 CHANGED=0
+# Persist the sets. `|| true` so a failure here degrades to "not persisted"
+# instead of aborting the run and silently skipping AbuseIPDB reporting.
 if [ "$NEW_ABUSIVE" -gt 0 ] 2>/dev/null; then
-    ipset save "$IPSET_ABUSIVE" > "$PERSIST_ABUSIVE"
+    ipset save "$IPSET_ABUSIVE" > "$PERSIST_ABUSIVE" || \
+        echo "$(date -Iseconds) WARN: failed to persist $PERSIST_ABUSIVE" >> "$LOG"
     CHANGED=1
 fi
 if [ "$NEW_SCANNER" -gt 0 ] 2>/dev/null; then
-    ipset save "$IPSET_SCANNERS" > "$PERSIST_SCANNERS"
+    ipset save "$IPSET_SCANNERS" > "$PERSIST_SCANNERS" || \
+        echo "$(date -Iseconds) WARN: failed to persist $PERSIST_SCANNERS" >> "$LOG"
     CHANGED=1
 fi
 
@@ -436,6 +464,21 @@ for ip, paths in reportable.items():
         with open(log_file, 'a') as lf:
             lf.write(f"{ip} FAILED: {e}\n")
 
+        # Rate limited: the remaining IPs would all fail too. Stop here and
+        # wait out the quota instead of hammering the API for every entry.
+        if '429' in str(e):
+            retry = 0
+            try:
+                retry = int(e.headers.get('Retry-After', 0)) if e.headers else 0
+            except Exception:
+                retry = 0
+            with open(log_file, 'a') as lf:
+                lf.write(
+                    f"ABUSEIPDB RATE LIMITED: stopped after {reported} reported, "
+                    f"{len(reportable) - reported} skipped. Retry-After: {retry}s\n"
+                )
+            break
+
     # Rate limit: max 15 reports/sec on free tier
     time.sleep(0.1)
 
@@ -443,6 +486,6 @@ print(reported)
 PYEOF
 
     REPORTED=$?
-    echo "$(date -Iseconds) Reported $NEW_REPORTABLE IPs to AbuseIPDB" >> "$LOG"
+    echo "$(date -Iseconds) Reported $REPORTED of $NEW_REPORTABLE IPs to AbuseIPDB" >> "$LOG"
     rm -f "$REPORT_FILE"
 fi
