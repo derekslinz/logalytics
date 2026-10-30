@@ -151,6 +151,13 @@
                     <span id="end-time" style="font-size: 0.75rem; color: var(--text-secondary);">---</span>
                 </div>
                 <input type="range" id="timeline-slider" class="timeline-slider" min="0" max="100" value="100">
+                <div style="display: flex; align-items: center; gap: 0.5rem; margin: 0.35rem 0 0.15rem;">
+                    <label for="persistence-slider" style="font-size: 0.7rem; color: var(--text-secondary); white-space: nowrap;">
+                        Marker trail
+                    </label>
+                    <input type="range" id="persistence-slider" class="timeline-slider" style="flex: 1;" min="0" max="100" value="100" title="How far back markers remain on the map">
+                    <span id="persistence-label" style="font-size: 0.7rem; color: var(--accent-color); min-width: 6.5rem; text-align: right;">all</span>
+                </div>
                 <div class="chart-container timeline-volume-chart">
                     <canvas id="volumeChart"></canvas>
                 </div>
@@ -161,7 +168,7 @@
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-datalabels@2.0.0"></script>
-    <script src="app.js?v=35"></script>
+    <script src="app.js?v=41"></script>
     <div id="notable-modal" class="modal-overlay">
         <div class="modal-content card" style="width: 90%; max-width: 800px; height: 80vh; display: flex; flex-direction: column;">
             <div class="card-title" style="display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--border-color); padding-bottom: 1rem;">

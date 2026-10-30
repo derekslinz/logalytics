@@ -64,6 +64,7 @@ async function init() {
         setupCharts();
         setupEvents();
         setupPanelResizers();
+        updatePersistenceLabel();
         updateDashboard();
         allNotable = data.notable || [];
         updateNotableDomains(allNotable);
@@ -78,8 +79,13 @@ function setupMap() {
         attributionControl: false
     }).setView([20, 0], 2);
 
-    L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
-        maxZoom: 19
+    // CARTO's basemaps CDN now serves an "API KEY REQUIRED" watermark tile
+    // instead of map data for unauthenticated requests, so this layer used
+    // to render as a grid of watermarks. ArcGIS World Dark Gray Base is a
+    // keyless dark basemap that matches the dashboard theme.
+    L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}', {
+        maxZoom: 16,
+        attribution: 'Tiles &copy; Esri'
     }).addTo(map);
 
     // Custom pane to isolate country polygons and prevent them from intercepting clicks
@@ -329,11 +335,76 @@ function updateDashboard() {
     updateNotableDomains(allNotable);
 }
 
+function getPersistenceWindowMs() {
+    // Marker trail length, expressed as a fraction of the loaded time span.
+    // 100 => keep everything, 0 => only the newest session.
+    const el = document.getElementById('persistence-slider');
+    const pct = el ? parseInt(el.value, 10) : 100;
+    if (!Number.isFinite(pct)) return Infinity;
+    if (pct >= 100) return Infinity;
+    if (pct <= 0) return 0;
+    const stamps = allSessions
+        .map(s => getSessionTimestamp(s, 'last'))
+        .filter(ts => Number.isFinite(ts) && ts > 0);
+    if (stamps.length === 0) return Infinity;
+    const span = Math.max(...stamps) - Math.min(...stamps);
+    if (span <= 0) return Infinity;
+    return span * (pct / 100);
+}
+
+function updatePersistenceLabel() {
+    const el = document.getElementById('persistence-label');
+    if (!el) return;
+    const pct = parseInt(document.getElementById('persistence-slider').value, 10);
+    if (pct >= 100) { el.innerText = 'all'; return; }
+    if (pct <= 0) { el.innerText = 'newest only'; return; }
+    const stamps = allSessions
+        .map(s => getSessionTimestamp(s, 'last'))
+        .filter(ts => Number.isFinite(ts) && ts > 0);
+    if (stamps.length === 0) { el.innerText = 'all'; return; }
+    const span = Math.max(...stamps) - Math.min(...stamps);
+    if (span <= 0) { el.innerText = 'all'; return; }
+    el.innerText = 'last ' + formatDuration(span * (pct / 100));
+}
+
+function formatDuration(ms) {
+    const min = ms / 60000;
+    if (min < 60) return Math.max(1, Math.round(min)) + 'm';
+    const hrs = min / 60;
+    if (hrs < 48) return Math.round(hrs * 10) / 10 + 'h';
+    return Math.round(hrs / 24) + 'd';
+}
+
 function updateMarkers() {
     markers.forEach(m => map.removeLayer(m));
     markers = [];
 
-    filteredSessions.filter(s => s.geo && s.geo.lat).slice(-150).forEach(s => {
+    // Markers accumulate: as the timeline advances, previously drawn markers
+    // stay on the map and new ones are added, up to MAX_MARKERS. Previously
+    // this redrew only the newest 150 sessions each time, so the map showed a
+    // rolling window rather than a growing trail.
+    const MAX_MARKERS = 2000;
+    const nowTs = allSessions.length
+        ? Math.max(...allSessions.slice(0, Math.floor((allSessions.length - 1) *
+            ((parseInt(document.getElementById('timeline-slider').value, 10)) / 100)) + 1)
+            .map(s => getSessionTimestamp(s, 'last'))
+            .filter(ts => Number.isFinite(ts) && ts > 0))
+        : 0;
+    const windowMs = getPersistenceWindowMs();
+    const cutoff = (windowMs === Infinity || !nowTs) ? -Infinity : nowTs - windowMs;
+
+    const candidates = filteredSessions.filter(s => {
+        if (!s.geo || !s.geo.lat) return false;
+        if (windowMs === Infinity) return true;
+        const ts = getSessionTimestamp(s, 'last');
+        return Number.isFinite(ts) && ts >= cutoff;
+    });
+
+    // Most recent first, then keep the newest MAX_MARKERS.
+    candidates.sort((a, b) => getSessionTimestamp(b, 'last') - getSessionTimestamp(a, 'last'));
+    const toDraw = candidates.slice(0, MAX_MARKERS).reverse();
+
+    toDraw.forEach(s => {
         const ttype = getTrafficType(s);
         const color = TRAFFIC_COLORS[ttype];
         const isBlocked = BLOCKED_COUNTRIES.includes(s.geo.country_code);
@@ -896,35 +967,101 @@ function escapeHtml(value) {
         .replace(/'/g, '&#39;');
 }
 
+let _topPathCache = { key: null, value: [] };
+let topPathSort = { key: 'count', dir: -1 };
+
 function getTopPathEntries() {
+    // Cache by (timeline position, filter). Without this the aggregation ran on
+    // every slider input event, which is wasteful for a result that only
+    // changes when the visible window or filter changes.
+    const sliderVal = document.getElementById('timeline-slider');
+    const key = `${currentFilter}:${sliderVal ? sliderVal.value : ''}`;
+    if (_topPathCache.key === key) return _topPathCache.value;
+
     const pathMap = {};
 
     filteredSessions.forEach((s) => {
         const ttype = getTrafficType(s);
         if (!(ttype === 'malicious' || ttype === 'bot' || isScannerTraffic(s))) return;
 
-        const uniquePaths = new Set(s.path_summary || []);
-        uniquePaths.forEach((path) => {
+        // Prefer the authoritative per-path breakdown from the analyzer.
+        // Fall back to path_summary for older data that predates path_stats.
+        const stats = (s.path_stats && Object.keys(s.path_stats).length)
+            ? Object.entries(s.path_stats).map(([p, v]) => ({ path: p, hits: v.hits, status: v.status }))
+            : (s.path_summary || []).map(p => ({ path: p, hits: Number(s.req_count || 0), status: null }));
+
+        stats.forEach(({ path, hits, status }) => {
             if (!pathMap[path]) {
                 pathMap[path] = {
                     path,
                     count: 0,
-                    ips: new Set()
+                    ips: new Set(),
+                    statuses: {}
                 };
             }
-            pathMap[path].count += Number(s.req_count || 0);
+            pathMap[path].count += Number(hits || 0);
             pathMap[path].ips.add(s.origin_ip);
+            if (status) {
+                pathMap[path].statuses[status] = (pathMap[path].statuses[status] || 0) + Number(hits || 0);
+            }
         });
     });
 
-    return Object.values(pathMap)
-        .map((entry) => ({
-            path: entry.path,
-            count: entry.count,
-            ips: [...entry.ips],
-            ipCount: entry.ips.size
-        }))
+    const result = Object.values(pathMap)
+        .map((entry) => {
+            // Most frequent status first; ties broken by code for stability.
+            const topStatus = Object.entries(entry.statuses).length
+                ? Object.entries(entry.statuses).sort((a, b) => (b[1] - a[1]) || a[0].localeCompare(b[0]))[0][0]
+                : null;
+            return {
+                path: entry.path,
+                count: entry.count,
+                ips: [...entry.ips],
+                ipCount: entry.ips.size,
+                status: topStatus,
+                statuses: entry.statuses
+            };
+        })
         .sort((a, b) => b.count - a.count);
+
+    _topPathCache = { key, value: result };
+    return result;
+}
+
+function sortTopPathEntries(entries) {
+    const { key, dir } = topPathSort;
+    const sorted = entries.slice().sort((a, b) => {
+        if (key === 'path') return dir * a.path.localeCompare(b.path);
+        if (key === 'ipCount') return dir * (a.ipCount - b.ipCount);
+        if (key === 'status') {
+            // Unknown statuses sort last regardless of direction.
+            const av = a.status || '', bv = b.status || '';
+            if (av === '' && bv !== '') return 1;
+            if (bv === '' && av !== '') return -1;
+            return dir * av.localeCompare(bv);
+        }
+        return dir * (a.count - b.count);
+    });
+    return sorted;
+}
+
+function statusBadge(status) {
+    if (!status) return '<span style="color: var(--text-secondary);">—</span>';
+    const code = parseInt(status, 10);
+    let color = 'var(--text-secondary)';
+    if (code >= 500) color = '#f43f5e';
+    else if (code >= 400) color = '#ffaa00';
+    else if (code >= 300) color = '#00f2ff';
+    else if (code >= 200) color = '#22c55e';
+    return `<span style="color:${color}; font-family:monospace; font-size:0.7rem;">${escapeHtml(status)}</span>`;
+}
+
+function topPathSortHeader(label, sortKey, align) {
+    const active = topPathSort.key === sortKey;
+    const arrow = active ? (topPathSort.dir === 1 ? '▲' : '▼') : '';
+    const cursor = 'cursor:pointer; user-select:none; white-space:nowrap;';
+    const color = active ? 'var(--accent-color)' : 'var(--text-secondary)';
+    return `<span data-sort-key="${sortKey}" title="Sort by ${label.toLowerCase()}" style="${cursor} ${align ? 'float:right;' : ''} color:${color};">${escapeHtml(label)} ${arrow}</span>`;
 }
 
 function renderPathIpDetailTable(path) {
@@ -1071,19 +1208,27 @@ function updateTopPaths() {
     if (!tableDiv) return;
 
     const allEntries = getTopPathEntries();
-    const entries = allEntries.slice(0, 50);
+    const entries = sortTopPathEntries(allEntries).slice(0, 50);
 
     let html = '<table style="width: 100%; border-collapse: collapse;">';
-    entries.forEach(({ path, count, ipCount }) => {
+    html += `<thead><tr style="border-bottom: 1px solid rgba(255,255,255,0.1);">
+        <th class="paths-sort-header" style="padding: 2px 0; text-align: left; font-size: 0.65rem; font-weight: 600;">${topPathSortHeader('Path', 'path')}</th>
+        <th class="paths-sort-header" style="padding: 2px 0; font-size: 0.65rem; font-weight: 600; width: 3.2rem;">${topPathSortHeader('IPs', 'ipCount', true)}</th>
+        <th class="paths-sort-header" style="padding: 2px 0; font-size: 0.65rem; font-weight: 600; width: 2.6rem;">${topPathSortHeader('Code', 'status', true)}</th>
+        <th class="paths-sort-header" style="padding: 2px 0; font-size: 0.65rem; font-weight: 600; width: 3rem;">${topPathSortHeader('Hits', 'count', true)}</th>
+    </tr></thead><tbody>`;
+
+    entries.forEach(({ path, count, ipCount, status }) => {
         html += `
             <tr style="border-bottom: 1px solid rgba(255,255,255,0.05);">
                 <td title="${escapeHtml(path)}" style="padding: 4px 0; font-size: 0.75rem; word-break: break-all; color: var(--text-primary); max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${escapeHtml(path)}</td>
-                <td style="padding: 4px 0; font-size: 0.75rem; text-align: right; color: var(--text-secondary);">${ipCount} IPs</td>
+                <td style="padding: 4px 0; font-size: 0.75rem; text-align: right; color: var(--text-secondary);">${ipCount}</td>
+                <td style="padding: 4px 0; text-align: right;">${statusBadge(status)}</td>
                 <td style="padding: 4px 0; font-size: 0.75rem; text-align: right; color: var(--accent-color); font-weight: 500;">${count}</td>
             </tr>
         `;
     });
-    html += '</table>';
+    html += '</tbody></table>';
 
     if (entries.length === 0) {
         html = '<div style="font-size: 0.75rem; color: var(--text-secondary); text-align: center; padding: 1rem 0;">No scanner paths found</div>';
@@ -1092,10 +1237,144 @@ function updateTopPaths() {
     }
 
     tableDiv.innerHTML = html;
+
+    tableDiv.querySelectorAll('.paths-sort-header [data-sort-key]').forEach(el => {
+        el.addEventListener('click', () => {
+            const key = el.getAttribute('data-sort-key');
+            if (topPathSort.key === key) {
+                topPathSort.dir *= -1;
+            } else {
+                topPathSort.key = key;
+                topPathSort.dir = (key === 'path' || key === 'status') ? 1 : -1;
+            }
+            updateTopPaths();
+            if (document.getElementById('paths-modal').classList.contains('open')) {
+                renderPathsModalBody();
+            }
+        });
+    });
+}
+
+function renderPathsModalBody() {
+    const body = document.getElementById('paths-modal-body');
+    if (!body) return;
+    const entries = sortTopPathEntries(getTopPathEntries());
+
+    if (!entries.length) {
+        body.innerHTML = '<div style="font-size: 0.8rem; color: var(--text-secondary); padding: 1rem 0;">No scanner paths found in current filter</div>';
+        lucide.createIcons();
+        return;
+    }
+
+    const CHUNK = 250;
+    let i = 0;
+
+    // The sort header is a STABLE element; only the row list below it is
+    // replaced. Previously the header was part of the chunked HTML, so each
+    // chunk replaced the node under the user's cursor mid-click and the click
+    // landed on the overlay, which closes the modal.
+    const list = document.createElement('div');
+    list.className = 'paths-sort-list';
+    body.innerHTML = '';
+    body.appendChild(list);
+
+    const header = document.createElement('div');
+    header.className = 'paths-sort-header';
+    header.style.cssText = 'display:flex; justify-content:space-between; font-size:0.65rem; color:var(--text-secondary); padding:0 0 4px; border-bottom:1px solid rgba(255,255,255,0.1);';
+    ['path|Path', 'ipCount|IPs', 'status|Code', 'count|Hits'].forEach(spec => {
+        const [key, label] = spec.split('|');
+        const span = document.createElement('span');
+        span.setAttribute('data-sort-key', key);
+        span.style.cursor = 'pointer';
+        span.textContent = label;
+        span.addEventListener('click', (e) => {
+            e.stopPropagation();
+            if (topPathSort.key === key) {
+                topPathSort.dir *= -1;
+            } else {
+                topPathSort.key = key;
+                topPathSort.dir = (key === 'path' || key === 'status') ? 1 : -1;
+            }
+            renderPathsModalBody();
+        });
+        header.appendChild(span);
+    });
+    body.appendChild(header);
+
+    const parts = [];
+    const renderChunk = () => {
+        const end = Math.min(i + CHUNK, entries.length);
+        let batch = '';
+        for (; i < end; i++) {
+            const { path, count, ipCount, status } = entries[i];
+            const encodedPath = encodeURIComponent(path);
+            batch += `<div class="path-row" data-path="${encodedPath}" style="margin-bottom: 0.75rem; border-bottom: 1px solid rgba(255,255,255,0.05); padding-bottom: 0.5rem; cursor: pointer;">
+                <div style="display: flex; justify-content: space-between; align-items: baseline; font-size: 0.8rem; gap: 12px;">
+                    <div style="min-width: 0; flex: 1;">
+                        <span title="${escapeHtml(path)}" style="color: var(--text-primary); display: inline-block; max-width: 100%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">${escapeHtml(path)}</span>
+                        <i data-lucide="chevron-down" style="width: 12px; height: 12px; display: inline-block; vertical-align: -2px; opacity: 0.4; margin-left: 4px;"></i>
+                    </div>
+                    <span style="color: var(--text-secondary); white-space: nowrap;">${ipCount} IPs</span>
+                    <span style="white-space: nowrap;">${statusBadge(status)}</span>
+                    <span style="color: var(--accent-color); white-space: nowrap; font-weight: 600;">${count} hits</span>
+                </div>
+                <div class="path-detail" style="display: none; margin-top: 0.5rem;"></div>
+            </div>`;
+        }
+        parts.push(batch);
+        list.innerHTML = parts.join('');
+        lucide.createIcons();
+        if (i < entries.length) {
+            requestAnimationFrame(renderChunk);
+        } else {
+            attachPathDrillDown(list);
+        }
+    };
+    renderChunk();
 }
 
 function setupEvents() {
-    document.getElementById('timeline-slider').addEventListener('input', updateDashboard);
+    const timelineSlider = document.getElementById('timeline-slider');
+    timelineSlider.addEventListener('input', updateDashboard);
+
+    // Click anywhere on the timeline track to jump the playhead there.
+    // Native range inputs only move on direct thumb drag, so clicking the
+    // track either does nothing or jumps by a coarse step.
+    const jumpToPointer = (e) => {
+        const track = timelineSlider.getBoundingClientRect();
+        if (track.width === 0) return;
+        const frac = Math.min(1, Math.max(0, (e.clientX - track.left) / track.width));
+        timelineSlider.value = Math.round(frac * 100);
+        updateDashboard();
+    };
+    timelineSlider.addEventListener('click', jumpToPointer);
+    // In Chromium a click on a range input can also fire at the original
+    // position; ignore the synthetic click that follows a drag.
+    timelineSlider.addEventListener('pointerup', (e) => {
+        if (e.button !== 0) return;
+        const track = timelineSlider.getBoundingClientRect();
+        const frac = (e.clientX - track.left) / track.width;
+        const expected = timelineSlider.value / 100;
+        if (Math.abs(frac - expected) > 0.02) jumpToPointer(e);
+    });
+
+    const persistenceSlider = document.getElementById('persistence-slider');
+    if (persistenceSlider) {
+        persistenceSlider.addEventListener('input', () => {
+            updatePersistenceLabel();
+            updateMarkers();
+        });
+        const persistTrack = persistenceSlider;
+        persistTrack.addEventListener('click', (e) => {
+            const track = persistTrack.getBoundingClientRect();
+            if (track.width === 0) return;
+            const frac = Math.min(1, Math.max(0, (e.clientX - track.left) / track.width));
+            persistTrack.value = Math.round(frac * 100);
+            updatePersistenceLabel();
+            updateMarkers();
+        });
+    }
+
     document.querySelectorAll('.toggle-btn').forEach(btn => {
         if (btn.id.startsWith('btn-')) {
             btn.addEventListener('click', (e) => {
@@ -1158,32 +1437,15 @@ function setupEvents() {
     document.getElementById('open-paths-modal').addEventListener('click', () => {
         const modal = document.getElementById('paths-modal');
         const body = document.getElementById('paths-modal-body');
-        const entries = getTopPathEntries();
 
-        if (!entries.length) {
-            body.innerHTML = '<div style="font-size: 0.8rem; color: var(--text-secondary); padding: 1rem 0;">No scanner paths found in current filter</div>';
-            modal.classList.add('open');
-            return;
-        }
-
-        body.innerHTML = entries.map(({ path, count, ipCount }) => {
-            const encodedPath = encodeURIComponent(path);
-            return `<div class="path-row" data-path="${encodedPath}" style="margin-bottom: 0.75rem; border-bottom: 1px solid rgba(255,255,255,0.05); padding-bottom: 0.5rem; cursor: pointer;">
-                <div style="display: flex; justify-content: space-between; align-items: baseline; font-size: 0.8rem; gap: 12px;">
-                    <div style="min-width: 0; flex: 1;">
-                        <span title="${escapeHtml(path)}" style="color: var(--text-primary); display: inline-block; max-width: 100%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">${escapeHtml(path)}</span>
-                        <i data-lucide="chevron-down" style="width: 12px; height: 12px; display: inline-block; vertical-align: -2px; opacity: 0.4; margin-left: 4px;"></i>
-                    </div>
-                    <span style="color: var(--text-secondary); white-space: nowrap;">${ipCount} IPs</span>
-                    <span style="color: var(--accent-color); white-space: nowrap; font-weight: 600;">${count} hits</span>
-                </div>
-                <div class="path-detail" style="display: none; margin-top: 0.5rem;"></div>
-            </div>`;
-        }).join('');
-
-        attachPathDrillDown(body);
+        // Open the modal immediately so it never feels unresponsive. The full
+        // list can be ~2,500 rows; building all of that HTML synchronously
+        // blocked the main thread long enough to look like a dead button.
         modal.classList.add('open');
-        lucide.createIcons();
+        body.innerHTML = '<div style="font-size: 0.8rem; color: var(--text-secondary); padding: 1rem 0;">Crunching path data…</div>';
+
+        // Defer the work past the paint so the modal is visible first.
+        setTimeout(() => renderPathsModalBody(), 0);
     });
 
     document.getElementById('close-paths-modal').addEventListener('click', () => {

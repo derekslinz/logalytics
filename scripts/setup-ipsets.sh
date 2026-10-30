@@ -7,15 +7,18 @@ set -euo pipefail
 echo "=== Creating ipsets ==="
 
 # Individual abusive IPs (hash:ip for exact match)
+# No default timeout: blocks accumulate indefinitely and are only removed
+# explicitly. Do not reintroduce a set-level timeout here — an existing set
+# keeps its original settings, so this only affects fresh creates.
 ipset list abusive_ips >/dev/null 2>&1 || {
-    ipset create abusive_ips hash:ip hashsize 8192 maxelem 65536 timeout 2147483
-    echo "Created abusive_ips (hash:ip)"
+    ipset create abusive_ips hash:ip hashsize 8192 maxelem 65536
+    echo "Created abusive_ips (hash:ip, no timeout)"
 }
 
 # Scanner network CIDR ranges (hash:net for prefix match)
 ipset list scanner_nets >/dev/null 2>&1 || {
-    ipset create scanner_nets hash:net hashsize 1024 maxelem 65536 timeout 2147483
-    echo "Created scanner_nets (hash:net)"
+    ipset create scanner_nets hash:net hashsize 1024 maxelem 65536
+    echo "Created scanner_nets (hash:net, no timeout)"
 }
 
 # Country-level CIDR blocks (hash:net)

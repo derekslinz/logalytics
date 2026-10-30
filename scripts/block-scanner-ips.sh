@@ -358,13 +358,15 @@ if ABUSEIPDB_KEY and unknown_ips:
             pass
 
 # Add to abusive_ips
+# No per-entry timeout: entries inherit the set default (no timeout) and
+# accumulate indefinitely. The previous `timeout 7776000` (90 days) forced an
+# expiry onto every entry regardless of the set-level setting.
 new_abusive = block_ips - existing
 for ip in new_abusive:
     reason_info = block_reasons.get(ip, {'reason': 'unknown', 'evidence': []})
     evidence_str = ' | '.join(reason_info.get('evidence', [])[:3]) if reason_info.get('evidence') else ''
     log_ip_block(ip, reason_info.get('reason', 'unknown'), evidence_str)
-    subprocess.run(['ipset', 'add', ipset_abusive, ip, 'timeout', '7776000'], capture_output=True)
-    subprocess.run(['ipset', 'add', ipset_abusive, ip, 'timeout', '7776000'], capture_output=True)
+    subprocess.run(['ipset', 'add', ipset_abusive, ip], capture_output=True)
 
 # Ensure safe IPs are never blocked (remove from sets if present)
 for ip in SAFE_IPS:
@@ -426,8 +428,7 @@ for ip in scanner_ips:
     r = subprocess.run(['ipset', 'test', ipset_scanners, ip], capture_output=True)
     if r.returncode != 0:
         log_ip_block(ip, 'scanner_detection', 'known_scanner_rdns')
-        subprocess.run(['ipset', 'add', ipset_scanners, ip, 'timeout', '7776000'], capture_output=True)
-        subprocess.run(['ipset', 'add', ipset_scanners, ip, 'timeout', '7776000'], capture_output=True)
+        subprocess.run(['ipset', 'add', ipset_scanners, ip], capture_output=True)
         new_scanner += 1
 
 # Write reportable IPs (new ones only) to temp file for AbuseIPDB

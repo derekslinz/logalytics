@@ -33,14 +33,20 @@ trap 'echo "$(date -Iseconds) FATAL: aborted at line $LINENO (exit $?)" >> "$LOG
 # ipsets are kernel state and are lost on reboot; if they are missing the
 # later `ipset save` calls abort the whole run under `set -e`, which
 # silently kills AbuseIPDB reporting. Recreate them up front instead.
+#
+# These sets are created WITHOUT a default timeout: blocks accumulate
+# indefinitely and only leave the set if explicitly removed. An earlier
+# revision used `timeout 2147483` (~24.9 days, the largest value that avoids
+# 32-bit signed overflow), which meant every block silently expired once an
+# IP stopped appearing in data.json for ~25 days.
 ensure_ipsets() {
     command -v ipset >/dev/null 2>&1 || return 0
     ipset list "$IPSET_ABUSIVE" >/dev/null 2>&1 || {
-        ipset create "$IPSET_ABUSIVE" hash:ip hashsize 8192 maxelem 65536 timeout 2147483
+        ipset create "$IPSET_ABUSIVE" hash:ip hashsize 8192 maxelem 65536
         echo "$(date -Iseconds) Recreated ipset $IPSET_ABUSIVE" >> "$LOG"
     }
     ipset list "$IPSET_SCANNERS" >/dev/null 2>&1 || {
-        ipset create "$IPSET_SCANNERS" hash:net hashsize 1024 maxelem 65536 timeout 2147483
+        ipset create "$IPSET_SCANNERS" hash:net hashsize 1024 maxelem 65536
         echo "$(date -Iseconds) Recreated ipset $IPSET_SCANNERS" >> "$LOG"
     }
 }
@@ -126,6 +132,16 @@ SCANNER_RDNS = [
     'intrinsec.com', 'securitytrails.com', 'panthera.network', 'leakix.com',
     'fofa.info', 'fofa.so'
 ]
+
+# rDNS suffixes to block outright. These are bulk/bulletproof hosting
+# providers whose IPs show up almost exclusively as scanners probing
+# /mcp, /api/mcp, /onvif/device_service and similar. Matched as a substring
+# of the rDNS hostname, so "x.infrawat.ch" and "infrawat.ch" both match.
+# Override with BLOCKED_RDNS="a.example b.example" (space separated).
+# These are blocked but NOT reported to AbuseIPDB: a shared hosting provider
+# is not itself evidence of abuse, and reporting wholesale provider ranges
+# would burn quota and risk the key.
+BLOCKED_RDNS = [s.strip().lower() for s in os.environ.get('BLOCKED_RDNS', 'infrawat.ch').split() if s.strip()]
 
 BLOCKED_COUNTRIES = set(os.environ.get('BLOCKED_COUNTRIES', '').split())
 SAFE_IPS = {ip.strip() for ip in re.split(r'[\s,]+', SAFE_IPS_RAW) if ip.strip()}
@@ -240,8 +256,14 @@ for s in data.get('sessions', []):
         continue
     if s.get('geo', {}).get('is_verified_bot', False):
         continue  # verified bot (FCrDNS confirmed) — never ban or report
-    # Check rDNS hostname for known scanners
+    # rDNS hostname check for known scanners
     hostname = (s.get('geo', {}).get('hostname') or '').lower()
+    # Hard block on configured provider rDNS suffixes. Checked after the
+    # verified-bot guard so a legitimate bot on such a range is still spared.
+    if BLOCKED_RDNS and any(suffix in hostname for suffix in BLOCKED_RDNS):
+        mark_block(ip, 'blocked_rdns', f'rDNS={hostname}')
+        continue
+    # Check rDNS hostname for known scanners
     if any(scanner in hostname for scanner in SCANNER_RDNS):
         scanner_ips.add(ip)
         continue

@@ -194,10 +194,56 @@ echo "0 */6 * * * $(pwd)/scripts/enforce-ipset-blocks.sh" | sudo crontab -
 - Blocks IPs hitting exploit paths (WordPress, `.env`, `.git`, PHP shells, etc.)
 - Blocks IPs from geo-blocked countries, **including CDN-proxied traffic** (Cloudflare, etc.)
 - Adds scanner rDNS matches (Censys, Shodan, etc.) to the scanner_nets set
+- Blocks IPs whose rDNS matches `BLOCKED_RDNS` (default: `infrawat.ch`) as `blocked_rdns`
 - **[Optional]** Checks uncategorized IPs against AbuseIPDB and auto-reports malicious activity (requires API key)
 - Persists all changes to disk
 
-Edit `BLOCKED_COUNTRIES`, `ABUSE_SCORE_THRESHOLD`, `ABUSE_REPORT_THRESHOLD`, `MALICIOUS_PATHS`, and `SCANNER_RDNS` at the top of the script (or override via environment variables) to customize parsing.
+Edit `BLOCKED_COUNTRIES`, `ABUSE_SCORE_THRESHOLD`, `ABUSE_REPORT_THRESHOLD`, `MALICIOUS_PATHS`, `SCANNER_RDNS`, and `BLOCKED_RDNS` at the top of the script (or override via environment variables) to customize parsing.
+
+**Block lifetime — blocks are permanent:**
+The `abusive_ips` and `scanner_nets` sets are created with **no default timeout**,
+so entries never expire on their own and the sets accumulate indefinitely. Only
+`SAFE_IPS` removal or an explicit `ipset del` takes an entry out.
+
+An earlier revision used `timeout 2147483` (~24.9 days — the largest value that
+avoids 32-bit signed overflow). Because the cron job re-adds any IP still present
+in `data.json`, that behaved as a *sliding* window: active attackers were fine,
+but any IP that fell out of the dataset for ~25 days silently un-blocked itself.
+If you are upgrading from that revision, the existing sets keep their old
+settings — an existing set is not modified by re-running `setup-ipsets.sh`.
+To convert them, rebuild from cleaned persist files:
+
+```bash
+sed -i 's/ timeout [0-9]*$//' /etc/ipset-abusive.conf /etc/ipset-scanners.conf
+sed -i '1s/ timeout [0-9]* / /'  /etc/ipset-abusive.conf /etc/ipset-scanners.conf
+./scripts/restore-ipsets.sh
+```
+
+Note `maxelem` is 65536 per set. Once an ipset is full, `ipset add` fails
+silently (`capture_output=True`), so monitor entry counts if you expect
+indefinite growth:
+
+```bash
+ipset list abusive_ips | grep "Number of entries"
+```
+
+**Blocking by rDNS (`BLOCKED_RDNS`):**
+Some hosting providers exist almost entirely to host scanners. `BLOCKED_RDNS` is a
+space-separated list of rDNS suffixes; any session whose reverse-DNS hostname
+contains one is added to the `abusive_ips` set with reason `blocked_rdns`.
+
+```bash
+BLOCKED_RDNS="infrawat.ch evil.example" ./scripts/enforce-ipset-blocks.sh
+```
+
+Notes:
+- Matching is a plain substring test on the lowercased hostname, so
+  `infrawat.ch` catches `1-2-3-4.infrawat.ch` and `infrawat.ch` itself.
+- These IPs are blocked but **not** reported to AbuseIPDB. A shared hosting
+  provider is not itself evidence of abuse, so reporting whole provider ranges
+  would waste daily quota and risk the API key.
+- The verified-bot guard runs first, so a legitimate FCrDNS-confirmed bot that
+  happens to resolve through one of these providers is still spared.
 
 **AbuseIPDB Integration (Optional):**
 To enable automated threat intelligence checking and reporting, create a free account on [AbuseIPDB](https://www.abuseipdb.com/) and save your API key to `/etc/abuseipdb.key`:
