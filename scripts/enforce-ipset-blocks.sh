@@ -121,7 +121,7 @@ MALICIOUS_PATHS = [
     r'/phpmyadmin', r'/pma/', r'/xampp/', r'/_vti_bin/', r'/manager/html', r'/muieblackcat',
     r'\.php$', r'/ecp/',
 ]
-SAFE_PATHS = [r'/send_mail\.php', r'/favicon', r'/robots\.txt', r'/sitemap\.xml']
+SAFE_PATHS = [r'/send_mail\.php', r'/api/pipeline-stats\.php', r'/favicon', r'/robots\.txt', r'/sitemap\.xml']
 
 SCANNER_RDNS = [
     'censys-scanner.com', 'internet-measurement.com', 'shodan.io', 'shodan.net',
