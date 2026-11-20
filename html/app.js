@@ -145,10 +145,7 @@ function setupMap() {
         attributionControl: false
     }).setView([20, 0], 2);
 
-    L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}', {
-        maxZoom: 16,
-        attribution: 'Tiles &copy; Esri'
-    }).addTo(map);
+    map.setMaxZoom(8);
 
     map.createPane('countryPane');
     map.getPane('countryPane').style.zIndex = 300;
@@ -168,7 +165,13 @@ function setupMap() {
                             color: '#f43f5e', fillOpacity: 0.3
                         };
                     }
-                    return { opacity: 0, fillOpacity: 0 };
+                    return {
+                        fillColor: '#151c29',
+                        color: '#344158',
+                        weight: 1,
+                        opacity: 0.85,
+                        fillOpacity: 0.95
+                    };
                 },
                 onEachFeature: function(feature, layer) {
                     const code = (feature.properties.iso_a2 || feature.properties.ISO_A2 || '').toUpperCase();
@@ -1517,7 +1520,7 @@ function updateMarkers() {
     const cutoff = (windowMs === Infinity || !nowTs) ? -Infinity : nowTs - windowMs;
 
     const candidates = filteredSessions.filter(s => {
-        if (!s.geo || !s.geo.lat) return false;
+        if (!s.geo || !Number.isFinite(Number(s.geo.lat)) || !Number.isFinite(Number(s.geo.lon))) return false;
         if (windowMs === Infinity) return true;
         const ts = getSessionTimestamp(s, 'last');
         return Number.isFinite(ts) && ts >= cutoff;
@@ -1525,6 +1528,7 @@ function updateMarkers() {
 
     candidates.sort((a, b) => getSessionTimestamp(b, 'last') - getSessionTimestamp(a, 'last'));
     const toDraw = candidates.slice(0, MAX_MARKERS).reverse();
+    const labeledLocations = new Set();
 
     toDraw.forEach(s => {
         const ttype = getTrafficType(s);
@@ -1553,6 +1557,21 @@ function updateMarkers() {
             fillColor: color, color: color, weight: 1,
             opacity: 0.8, fillOpacity: 0.4
         }).bindPopup(popupContent);
+
+        const city = (s.geo.city || '').trim();
+        const country = (s.geo.country_code || s.geo.country || '').trim();
+        const locationKey = `${city.toLowerCase()}|${country.toLowerCase()}`;
+        if (city && !labeledLocations.has(locationKey)) {
+            labeledLocations.add(locationKey);
+            marker.bindTooltip(escapeHtml(city), {
+                permanent: true,
+                direction: 'top',
+                offset: L.point(0, -Math.min(12, 4 + Math.sqrt(s.req_count))),
+                className: 'city-map-label',
+                opacity: 0.95,
+                interactive: false
+            });
+        }
 
         marker.addTo(map);
         markers.push(marker);

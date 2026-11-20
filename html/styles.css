@@ -150,6 +150,24 @@ main {
     flex: 1;
     min-height: 0;
     z-index: 1;
+    background: #080d15;
+}
+
+.city-map-label {
+    background: rgba(8, 13, 21, 0.88);
+    border: 1px solid rgba(0, 242, 255, 0.35);
+    border-radius: 3px;
+    box-shadow: none;
+    color: #dcebf5;
+    font-size: 9px;
+    font-weight: 600;
+    line-height: 1;
+    padding: 3px 5px;
+    white-space: nowrap;
+}
+
+.leaflet-tooltip-top.city-map-label::before {
+    border-top-color: rgba(8, 13, 21, 0.88);
 }
 
 .timeline-container {
@@ -167,7 +185,7 @@ main {
 }
 
 .center-pane.with-live-panel-open .timeline-container {
-    margin-right: var(--right-panel-width);
+    margin-right: min(var(--right-panel-width), 55%);
 }
 
 .timeline-volume-chart {
@@ -240,7 +258,7 @@ main {
     position: absolute;
     top: 0;
     right: 0;
-    width: var(--right-panel-width);
+    width: min(var(--right-panel-width), 55%);
     height: 100%;
     background: rgba(12, 14, 20, 0.95);
     backdrop-filter: blur(15px);
