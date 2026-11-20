@@ -1,4 +1,8 @@
 html/data.json
+html/summary.json
+html/notables.json
+html/shards/
+ISA*.md
 *.log
 *.tmp
 *.conf

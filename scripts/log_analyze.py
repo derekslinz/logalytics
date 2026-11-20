@@ -26,6 +26,7 @@ OWNER_IP = os.environ.get('LOG_ANALYZER_OWNER_IP', '')
 OUTPUT_FILES = [
     '/var/www/logalytics/html/data.json',
 ]
+SHARDS_BUILDER = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'build-shards.py')
 
 def is_valid_ip(ip):
     try:
@@ -90,19 +91,6 @@ CENSUS_BOT_PATTERN = re.compile(
 
 MALICIOUS_PATHS_FALLBACK = re.compile(
     r'(\.php|wp-admin|wp-login|xml-?rpc|\.env|\.git|\.config|admin|backup|shell|cgi-bin|wp/v2/users|server-status|login\.action|login\.do|\.jsp|\.asp|\.aws/|\.ssh/|\.kube/|ecp/)',
-    re.IGNORECASE
-)
-
-# Paths served by the tarpit (nginx-exploit-paths.conf returns 200 to these).
-# A 200 on a tarpit path = scanner engaged with the honeypot.
-TARPIT_PATHS = re.compile(
-    r'^/(wp-admin|wp-login|wp-content|wp-json|wp-includes|wordpress|xmlrpc\.php'
-    r'|\.(env|git|streamlit)'
-    r'|cgi-bin|HNAP|SDK|sdk|hudson|swagger\.json'
-    r'|admin|login|dashboard|user|developmentserver|luci'
-    r'|evox|nmaplowercheck'
-    r'|phpmyadmin|pma|xampp|_vti_bin|manager/html|muieblackcat'
-    r'|ecp/)',
     re.IGNORECASE
 )
 
@@ -654,6 +642,23 @@ def analyze(top_paths=10):
         malicious_path_stats = state.get('malicious_path_stats', {})
         non_malicious_path_stats = state.get('non_malicious_path_stats', {})
         log_offsets = state.get('log_offsets', {})
+        for session in sessions.values():
+            was_tarpited = session.pop('tarpited', False)
+            if session.get('intent') == "Tarpited Scanner" or was_tarpited:
+                session['intent'] = "Passive Traffic"
+                session['tags'] = [
+                    tag for tag in session.get('tags', [])
+                    if tag not in {'tarpited', 'known scanner pattern', 'common exploit path'}
+                ]
+                country_code = (session.get('geo') or {}).get('country_code')
+                hostname = (session.get('geo') or {}).get('hostname') or ''
+                tags = set(session.get('tags', []))
+                has_non_path_signal = (
+                    country_code in {'RU', 'BY'}
+                    or "internet census" in tags
+                    or bool(CENSUS_BOT_PATTERN.search(hostname))
+                )
+                session['is_malicious'] = has_non_path_signal
     else:
         sessions = {}
         ip_cache = {}
@@ -760,8 +765,12 @@ def analyze(top_paths=10):
                     block_meta = block_history.get(origin_ip, {})
                     is_blocked_origin = bool(block_meta.get('blocked_at') or block_meta.get('block_reason'))
 
-                    is_malicious_path = is_malicious_path_match(path, malicious_literal_paths, malicious_regex_paths) or bool(MALICIOUS_PATHS_FALLBACK.search(path))
-                    if is_malicious_path:
+                    is_malicious_path = (
+                        is_malicious_path_match(path, malicious_literal_paths, malicious_regex_paths)
+                        or bool(MALICIOUS_PATHS_FALLBACK.search(path))
+                    )
+                    is_path_probe = status >= 400 and is_malicious_path
+                    if is_path_probe:
                         update_path_stats(malicious_path_stats, path, s_key, origin_ip, is_blocked_origin)
                     else:
                         update_path_stats(non_malicious_path_stats, path, s_key, origin_ip, is_blocked_origin)
@@ -808,6 +817,8 @@ def analyze(top_paths=10):
                             'intent': "Passive Traffic",
                             'tags': [],
                             'is_malicious': False,
+                            'successful_paths': [],
+                            'failed_scanner_paths': [],
                             'blocked_at': block_meta.get('blocked_at'),
                             'block_reason': block_meta.get('block_reason'),
                             'block_evidence': block_meta.get('evidence', [])
@@ -818,25 +829,30 @@ def analyze(top_paths=10):
                     s['requests'].append({'time': ts, 'path': sanitize(path), 'status': status})
                     if 200 <= status < 300:
                         s['status_counts']['2xx'] += 1
+                        if path not in s.setdefault('successful_paths', []):
+                            s['successful_paths'].append(path)
                     elif 300 <= status < 400:
                         s['status_counts']['3xx'] += 1
                     elif 400 <= status < 500:
                         s['status_counts']['4xx'] += 1
                     elif 500 <= status < 600:
                         s['status_counts']['5xx'] += 1
+                    if is_path_probe and path not in s.setdefault('failed_scanner_paths', []):
+                        s['failed_scanner_paths'].append(path)
                     s['first_seen'] = min(s['first_seen'], ts)
                     s['last_seen'] = max(s['last_seen'], ts)
                     
                     # Pattern Clustering
-                    for pattern, label in PATTERN_GROUPS:
-                        if pattern.search(path):
-                            s['intent'] = label
-                            break
+                    if is_path_probe:
+                        for pattern, label in PATTERN_GROUPS:
+                            if pattern.search(path):
+                                s['intent'] = label
+                                break
 
                     # Explainability Tags
-                    if status >= 400 and not ip_cache[origin_ip]['is_bot']:
+                    if is_path_probe and not ip_cache[origin_ip]['is_bot']:
                         if "known scanner pattern" not in s['tags']: s['tags'].append("known scanner pattern")
-                    if "Probe" in s['intent'] or "Scanner" in s['intent']:
+                    if is_path_probe and ("Probe" in s['intent'] or "Scanner" in s['intent']):
                         if "common exploit path" not in s['tags']: s['tags'].append("common exploit path")
                     if ip_cache[origin_ip]['is_bot']:
                         if "crawler" not in s['tags']: s['tags'].append("crawler")
@@ -846,25 +862,16 @@ def analyze(top_paths=10):
                     if c_code not in country_ips:
                         country_ips[c_code] = { 'legit': set(), 'bots': set(), 'malicious': set(), 'name': ip_cache[origin_ip]['country'] or 'Unknown' }
                     
-                    is_tarpited = (status == 200 and not ip_cache[origin_ip]["is_bot"] and bool(TARPIT_PATHS.search(path)))
                     is_census_bot = bool(CENSUS_BOT_PATTERN.search(data['agent'])) or \
                                     bool(CENSUS_BOT_PATTERN.search(ip_cache[origin_ip]['hostname'] or ''))
 
-                    is_malicious = (status >= 400 and not ip_cache[origin_ip]['is_bot'] and (
-                                        is_malicious_path_match(path, malicious_literal_paths, malicious_regex_paths) or
-                                        bool(MALICIOUS_PATHS_FALLBACK.search(path))
-                                    )) or \
-                                   is_tarpited or \
+                    is_malicious = (is_path_probe and not ip_cache[origin_ip]['is_bot']) or \
                                    (c_code in ['RU', 'BY']) or \
                                    is_census_bot
                     
                     if is_malicious: 
                         country_ips[c_code]['malicious'].add(origin_ip)
                         s['is_malicious'] = True
-                        if is_tarpited:
-                            s['intent'] = "Tarpited Scanner"
-                            s['tarpited'] = True
-                            if "tarpited" not in s['tags']: s['tags'].append("tarpited")
                         if is_census_bot:
                             s['intent'] = "Census Scanner"
                             if "internet census" not in s['tags']:
@@ -957,13 +964,30 @@ def analyze(top_paths=10):
             notable_entities[label].add(ip)
     output_data['notable'] = [{'label': l, 'ips': list(ips), 'count': len(ips)} for l, ips in notable_entities.items()]
 
+    output_written = False
     for f in OUTPUT_FILES:
         try:
             os.makedirs(os.path.dirname(f), exist_ok=True)
             with open(f, 'w') as out: json.dump(output_data, out, indent=2)
             progress('Wrote output file', extra=f)
+            output_written = True
         except Exception as e:
             print(f"Warning: Could not write to {f}: {e}")
+
+    if output_written and os.path.exists(SHARDS_BUILDER):
+        try:
+            result = subprocess.run(
+                [sys.executable, SHARDS_BUILDER],
+                check=True,
+                capture_output=True,
+                text=True
+            )
+            if result.stdout:
+                print(result.stdout.strip())
+            progress('Rebuilt dashboard summary and shards')
+        except subprocess.CalledProcessError as e:
+            detail = (e.stderr or e.stdout or str(e)).strip()
+            print(f"Warning: Could not rebuild dashboard summary and shards: {detail}", file=sys.stderr)
 
     progress('Analysis complete', len(final_sessions), extra=f'unique IPs={len(ip_cache)}')
 

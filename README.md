@@ -147,7 +147,7 @@ All configuration is in `app.js` constants at the top of the file:
 | Cloud | Purple `#a855f7` | `geo.is_cloud` is true |
 | Hosting | Green `#22c55e` | `geo.is_hosting` is true |
 | Bot | Amber `#ffaa00` | `geo.is_bot` is true |
-| Malicious | Red `#f43f5e` | `is_malicious` or hits scanner path patterns |
+| Malicious | Red `#f43f5e` | `is_malicious` or has a non-successful request matching a scanner path pattern |
 
 ## Blocked IP Indicators
 
@@ -356,6 +356,10 @@ The dashboard is data-source agnostic. You can generate `data.json` from any web
 ### Malicious path rules (`malicious_paths.txt`)
 
 `scripts/log_analyze.py` supports both literal paths and regex rules:
+
+Path patterns only count as scanner traffic when the matching request returns a
+non-successful status (`4xx` or `5xx`). A `2xx` response is always treated as
+successful application traffic for path-based classification.
 
 - **Literal path** (exact match after normalization):
   - `/wp-login.php`

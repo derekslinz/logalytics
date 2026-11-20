@@ -1,73 +1,139 @@
-let allSessions = [];
+/*
+ * Logalytics — dashboard application logic (summary-first, shard-on-demand).
+ *
+ * Re-architected so the browser never fetches the full 47 MB data.json.
+ *   1. Load summary.json (~tens of KB) up front: totals, countries, top paths,
+ *      top notables, precomputed aggregates, and the shard index.
+ *   2. Render charts/feed/map setup from summary immediately.
+ *   3. Fetch session shards on demand as the timeline slider moves (each shard
+ *      ~100 KB, ~190 sessions), cached in memory.
+ *   4. Filter toggles re-render from already-loaded shards — no refetch.
+ *
+ * All existing features preserved: map markers, status/type/volume charts,
+ * live feed, top paths, notable orgs, country report, playback, persistence.
+ */
+
+let allSessions = [];        // sessions from shards loaded so far (concat)
+let shardCache = {};         // shard index -> parsed session array
+let loadedShardIndices = new Set();
 let filteredSessions = [];
 let allNotable = [];
+let topNotables = {};
+let summary = null;
 let map, markers = [];
 let statusChart, volumeChart, typeChart;
 let currentFilter = 'all';
+let activeFilters = {};    // { path: value, ip: value, provider: value }
+let filterCatalog = {};    // summary.filters {paths, ips, providers}
 let isPlaying = false;
 let playInterval;
 const PANEL_SIZE_STORAGE_KEY = 'logalytics-panel-sizes-v1';
 const PANEL_SIZE_LIMITS = {
-    leftMin: 260,
-    leftMax: 700,
-    rightMin: 420,
-    rightMax: 1400,
-    timelineMin: 110,
-    timelineMax: 500
+    leftMin: 260, leftMax: 700,
+    rightMin: 420, rightMax: 1400,
+    timelineMin: 110, timelineMax: 500
 };
-const BLOCKED_COUNTRIES = (window.APP_CONFIG && window.APP_CONFIG.BLOCKED_COUNTRIES) 
-    ? window.APP_CONFIG.BLOCKED_COUNTRIES 
+const BLOCKED_COUNTRIES = (window.APP_CONFIG && window.APP_CONFIG.BLOCKED_COUNTRIES)
+    ? window.APP_CONFIG.BLOCKED_COUNTRIES
     : ['RU', 'BY', 'KZ', 'BR', 'IN', 'CN', 'PH', 'ID', 'IR', 'KP', 'VN', 'NG'];
 
 function getSessionTimestamp(session, kind = 'last') {
     const numericKey = kind === 'first' ? 'first_seen' : 'last_seen';
     const isoKey = kind === 'first' ? 'first_seen_iso' : 'last_seen_iso';
-
     const numeric = Number(session?.[numericKey]);
     if (Number.isFinite(numeric) && numeric > 0) {
         return numeric * 1000;
     }
-
     const parsed = Date.parse(session?.[isoKey]);
     if (Number.isFinite(parsed)) {
         return parsed;
     }
-
     return 0;
+}
+
+function shardIndexForPosition(pct) {
+    // Map timeline percent (0-100) to shard index using the summary shard index.
+    const shards = summary.shards || [];
+    if (!shards.length) return 0;
+    const idx = Math.floor((shards.length - 1) * (pct / 100));
+    return Math.max(0, Math.min(shards.length - 1, idx));
+}
+
+async function fetchShard(index) {
+    if (loadedShardIndices.has(index)) return shardCache[index] || [];
+    const shard = (summary.shards || [])[index];
+    if (!shard) return [];
+    const url = shard.file;
+    try {
+        const response = await fetch(url, { cache: 'no-store' });
+        if (!response.ok) return [];
+        const sessions = await response.json();
+        shardCache[index] = sessions;
+        loadedShardIndices.add(index);
+        return sessions;
+    } catch (e) {
+        console.error("Failed to load shard", index, url, e);
+        return [];
+    }
+}
+
+async function ensureShardsAroundPosition(pct) {
+    // Load the shard for the current position plus neighbors so scrubbing
+    // stays responsive without fetching every shard up front.
+    const center = shardIndexForPosition(pct);
+    const toLoad = new Set([center]);
+    const shards = summary.shards || [];
+    // load neighbors within 2 shards
+    for (let off = -2; off <= 2; off++) {
+        const i = center + off;
+        if (i >= 0 && i < shards.length) toLoad.add(i);
+    }
+    await Promise.all([...toLoad].map(i => fetchShard(i)));
+    rebuildAllSessions();
+}
+
+function rebuildAllSessions() {
+    // Concat cached shards in shard order, dedupe by origin_ip+first_seen.
+    const merged = [];
+    const shards = summary.shards || [];
+    for (const shard of shards) {
+        const idx = shard.index;
+        if (!loadedShardIndices.has(idx)) continue;
+        merged.push(...(shardCache[idx] || []));
+    }
+    // Oldest first, matching the original dashboard so timeline slider
+    // 0 = oldest session, 100 = all sessions.
+    merged.sort((a, b) => getSessionTimestamp(a, 'last') - getSessionTimestamp(b, 'last'));
+    allSessions = merged;
 }
 
 async function init() {
     if (typeof ChartDataLabels !== 'undefined') {
         Chart.register(ChartDataLabels);
     }
-    
-    try {
-        const dataUrl = `data.json?v=${Date.now()}`;
-        const response = await fetch(dataUrl, { cache: 'no-store' });
-        if (!response.ok) throw new Error("Fetch failed: " + response.status);
-        const data = await response.json();
-        const IGNORE_IPS = ['::1', '127.0.0.1', '0.0.0.0'];
-        allSessions = (data.sessions || []).filter(s => !IGNORE_IPS.includes(s.origin_ip));
-        const summary = data.summary || {};
-        
-        if (allSessions.length === 0) {
-            setupMap();
-            return;
-        }
 
-        // Sort by last seen (numeric timestamp preferred for stability)
-        allSessions.sort((a, b) => getSessionTimestamp(a, 'last') - getSessionTimestamp(b, 'last'));
-        
-        document.getElementById('timeline-slider').value = 100;
+    try {
+        // --- Load small summary up front, NOT the 47 MB data.json ---
+        const response = await fetch('summary.json?v=' + Date.now(), { cache: 'no-store' });
+        if (!response.ok) throw new Error("Fetch failed: " + response.status);
+        summary = await response.json();
+
+        const IGNORE_IPS = ['::1', '127.0.0.1', '0.0.0.0'];
+        topNotables = summary.topNotables || {};
+        allNotable = summary.topNotables ? [] : []; // full notables load on demand
+        filterCatalog = summary.filters || {};
 
         setupMap();
         setupCharts();
         setupEvents();
         setupPanelResizers();
+        renderFilterControls();
         updatePersistenceLabel();
+
+        // Seed with the shard at timeline position 100 (newest), then render.
+        document.getElementById('timeline-slider').value = 100;
+        await ensureShardsAroundPosition(100);
         updateDashboard();
-        allNotable = data.notable || [];
-        updateNotableDomains(allNotable);
     } catch (e) {
         console.error("Dashboard initialization error:", e);
     }
@@ -79,21 +145,15 @@ function setupMap() {
         attributionControl: false
     }).setView([20, 0], 2);
 
-    // CARTO's basemaps CDN now serves an "API KEY REQUIRED" watermark tile
-    // instead of map data for unauthenticated requests, so this layer used
-    // to render as a grid of watermarks. ArcGIS World Dark Gray Base is a
-    // keyless dark basemap that matches the dashboard theme.
     L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}', {
         maxZoom: 16,
         attribution: 'Tiles &copy; Esri'
     }).addTo(map);
 
-    // Custom pane to isolate country polygons and prevent them from intercepting clicks
     map.createPane('countryPane');
-    map.getPane('countryPane').style.zIndex = 300; // Place behind markers (which default to 400)
-    map.getPane('countryPane').style.pointerEvents = 'none'; // Completely disable mouse interactions
+    map.getPane('countryPane').style.zIndex = 300;
+    map.getPane('countryPane').style.pointerEvents = 'none';
 
-    // Blocked Country Shading
     fetch('countries.geojson')
         .then(res => res.json())
         .then(geoData => {
@@ -104,11 +164,8 @@ function setupMap() {
                     const code = (feature.properties.iso_a2 || feature.properties.ISO_A2 || '').toUpperCase();
                     if (BLOCKED_COUNTRIES.includes(code)) {
                         return {
-                            fillColor: '#f43f5e',
-                            weight: 1,
-                            opacity: 1,
-                            color: '#f43f5e',
-                            fillOpacity: 0.3
+                            fillColor: '#f43f5e', weight: 1, opacity: 1,
+                            color: '#f43f5e', fillOpacity: 0.3
                         };
                     }
                     return { opacity: 0, fillOpacity: 0 };
@@ -144,16 +201,19 @@ function setupCharts() {
         cutout: '60%'
     };
 
+    const agg = summary.aggregates || {};
+    const statusTotals = agg.statusTotals || [0, 0, 0, 0];
+    const typeCounts = agg.typeCounts || { legit: 0, cloud: 0, hosting: 0, bot: 0, malicious: 0 };
+
     const ctxStatus = document.getElementById('statusChart').getContext('2d');
     statusChart = new Chart(ctxStatus, {
         type: 'doughnut',
         data: {
             labels: ['2xx', '3xx', '4xx', '5xx'],
             datasets: [{
-                data: [0, 0, 0, 0],
+                data: statusTotals,
                 backgroundColor: ['#00f2ff', '#ffaa00', '#f43f5e', '#8b5cf6'],
-                borderWidth: 0,
-                spacing: 4
+                borderWidth: 0, spacing: 4
             }]
         },
         options: chartOptions
@@ -163,12 +223,11 @@ function setupCharts() {
     typeChart = new Chart(ctxType, {
         type: 'doughnut',
         data: {
-            labels: ['Legit', 'Bots', 'Malicious'],
+            labels: ['Legit', 'Cloud', 'Hosting', 'Bots', 'Malicious'],
             datasets: [{
-                data: [0, 0, 0],
-                backgroundColor: ['#00f2ff', '#ffaa00', '#f43f5e'],
-                borderWidth: 0,
-                spacing: 4
+                data: [typeCounts.legit, typeCounts.cloud, typeCounts.hosting, typeCounts.bots, typeCounts.malicious],
+                backgroundColor: ['#00f2ff', '#a855f7', '#22c55e', '#ffaa00', '#f43f5e'],
+                borderWidth: 0, spacing: 4
             }]
         },
         options: chartOptions
@@ -181,40 +240,20 @@ function setupCharts() {
             labels: [],
             datasets: [
                 {
-                    type: 'bar',
-                    label: 'Requests',
-                    data: [],
-                    yAxisID: 'yRequests',
-                    backgroundColor: 'rgba(0, 242, 255, 0.35)',
-                    borderColor: '#00f2ff',
-                    borderWidth: 1
+                    type: 'bar', label: 'Requests', data: [], yAxisID: 'yRequests',
+                    backgroundColor: 'rgba(0, 242, 255, 0.35)', borderColor: '#00f2ff', borderWidth: 1
                 },
                 {
-                    type: 'line',
-                    label: 'Unique IPs',
-                    data: [],
-                    yAxisID: 'yIps',
-                    borderColor: '#a855f7',
-                    backgroundColor: 'rgba(168, 85, 247, 0.2)',
-                    borderWidth: 2,
-                    pointRadius: 2,
-                    pointHoverRadius: 4,
-                    tension: 0.3
+                    type: 'line', label: 'Unique IPs', data: [], yAxisID: 'yIps',
+                    borderColor: '#a855f7', backgroundColor: 'rgba(168, 85, 247, 0.2)',
+                    borderWidth: 2, pointRadius: 2, pointHoverRadius: 4, tension: 0.3
                 }
             ]
         },
         options: {
-            responsive: true,
-            maintainAspectRatio: false,
+            responsive: true, maintainAspectRatio: false,
             plugins: {
-                legend: {
-                    display: true,
-                    labels: {
-                        color: '#94a3b8',
-                        boxWidth: 10,
-                        usePointStyle: true
-                    }
-                },
+                legend: { display: true, labels: { color: '#94a3b8', boxWidth: 10, usePointStyle: true } },
                 datalabels: { display: false },
                 tooltip: {
                     callbacks: {
@@ -226,58 +265,20 @@ function setupCharts() {
                 x: {
                     display: true,
                     grid: { color: 'rgba(255, 255, 255, 0.05)', drawBorder: false },
-                    ticks: {
-                        color: '#94a3b8',
-                        maxTicksLimit: 8,
-                        autoSkip: true,
-                        maxRotation: 0
-                    },
-                    title: {
-                        display: true,
-                        text: 'Time',
-                        color: '#94a3b8',
-                        font: { size: 10, weight: '600' }
-                    }
+                    ticks: { color: '#94a3b8', maxTicksLimit: 8, autoSkip: true, maxRotation: 0 },
+                    title: { display: true, text: 'Time', color: '#94a3b8', font: { size: 10, weight: '600' } }
                 },
                 yRequests: {
-                    display: true,
-                    beginAtZero: true,
-                    position: 'left',
-                    ticks: {
-                        color: '#94a3b8',
-                        maxTicksLimit: 4,
-                        callback: (value) => Number(value).toLocaleString()
-                    },
-                    title: {
-                        display: true,
-                        text: 'Requests',
-                        color: '#94a3b8',
-                        font: { size: 10, weight: '600' }
-                    },
-                    grid: {
-                        color: 'rgba(255, 255, 255, 0.08)',
-                        drawBorder: false
-                    }
+                    display: true, beginAtZero: true, position: 'left',
+                    ticks: { color: '#94a3b8', maxTicksLimit: 4, callback: (value) => Number(value).toLocaleString() },
+                    title: { display: true, text: 'Requests', color: '#94a3b8', font: { size: 10, weight: '600' } },
+                    grid: { color: 'rgba(255, 255, 255, 0.08)', drawBorder: false }
                 },
                 yIps: {
-                    display: true,
-                    beginAtZero: true,
-                    position: 'right',
-                    ticks: {
-                        color: '#b794f4',
-                        maxTicksLimit: 4,
-                        callback: (value) => Number(value).toLocaleString()
-                    },
-                    title: {
-                        display: true,
-                        text: 'Unique IPs',
-                        color: '#b794f4',
-                        font: { size: 10, weight: '600' }
-                    },
-                    grid: {
-                        drawOnChartArea: false,
-                        drawBorder: false
-                    }
+                    display: true, beginAtZero: true, position: 'right',
+                    ticks: { color: '#b794f4', maxTicksLimit: 4, callback: (value) => Number(value).toLocaleString() },
+                    title: { display: true, text: 'Unique IPs', color: '#b794f4', font: { size: 10, weight: '600' } },
+                    grid: { drawOnChartArea: false, drawBorder: false }
                 }
             }
         }
@@ -291,53 +292,64 @@ function sessionMatchesCurrentFilter(s) {
     if (currentFilter === 'hosting') return ttype === 'hosting';
     if (currentFilter === 'bots') return ttype === 'bot';
     if (currentFilter === 'malicious') return ttype === 'malicious';
+
+    // Active dimension filters (path / ip / provider) — ANDed together.
+    if (activeFilters.path && !(s.path_summary || []).includes(activeFilters.path)) return false;
+    if (activeFilters.ip && s.origin_ip !== activeFilters.ip) return false;
+    if (activeFilters.provider) {
+        const g = s.geo || {};
+        const asn = g.asn ? 'AS' + g.asn : '';
+        const asnName = (g.asn_name || '');
+        if (asn !== activeFilters.provider && !asnName.includes(activeFilters.provider)) return false;
+    }
+
     return true;
 }
 
 function formatBucketLabel(ts) {
     if (!ts || !Number.isFinite(ts)) return '';
-    return new Date(ts).toLocaleString('en-US', {
-        month: 'short',
-        day: 'numeric',
-        hour: '2-digit',
-        minute: '2-digit'
+    return new Date(ts * 1000).toLocaleString('en-US', {
+        month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit'
     });
 }
 
 function updateDashboard() {
     const sliderVal = document.getElementById('timeline-slider').value;
-    const total = allSessions.length;
-    if (total === 0) return;
-    
-    const maxIdx = Math.floor((total - 1) * (sliderVal / 100));
-    
-    filteredSessions = allSessions.slice(0, maxIdx + 1).filter(sessionMatchesCurrentFilter);
+    const pct = Number(sliderVal);
 
-    document.getElementById('total-req').innerText = filteredSessions.reduce((acc, s) => acc + s.req_count, 0).toLocaleString();
-    const uniqueIPs = new Set(filteredSessions.map(s => s.origin_ip)).size;
-    document.getElementById('unique-ips').innerText = uniqueIPs.toLocaleString();
+    // Ensure shards around this position are loaded (cached fetch).
+    ensureShardsAroundPosition(pct).then(() => {
+        const total = allSessions.length;
+        if (total === 0) return;
 
-    if (total > 0 && allSessions[0] && allSessions[maxIdx]) {
-        const startTs = Math.min(...allSessions.map(s => getSessionTimestamp(s, 'first')).filter(ts => ts > 0));
-        const endTs = Math.max(...allSessions.map(s => getSessionTimestamp(s, 'last')).filter(ts => ts > 0));
-        const currentTs = Math.max(...allSessions.slice(0, maxIdx + 1).map(s => getSessionTimestamp(s, 'last')).filter(ts => ts > 0));
+        const maxIdx = Math.floor((total - 1) * (pct / 100));
+        const windowSessions = allSessions.slice(0, maxIdx + 1);
+        filteredSessions = windowSessions.filter(sessionMatchesCurrentFilter);
 
-        document.getElementById('start-time').innerText = formatDate(new Date(startTs));
-        document.getElementById('current-time').innerText = formatDate(new Date(currentTs));
-        document.getElementById('end-time').innerText = formatDate(new Date(endTs));
-    }
+        document.getElementById('total-req').innerText =
+            filteredSessions.reduce((acc, s) => acc + (s.req_count || 0), 0).toLocaleString();
+        const uniqueIPs = new Set(filteredSessions.map(s => s.origin_ip)).size;
+        document.getElementById('unique-ips').innerText = uniqueIPs.toLocaleString();
 
-    updateMarkers();
-    updateChartsData(maxIdx);
-    updateLogFeed();
-    updateCountryReport();
-    updateTopPaths();
-    updateNotableDomains(allNotable);
+        if (total > 0) {
+            const startTs = Math.min(...allSessions.map(s => getSessionTimestamp(s, 'first')).filter(ts => ts > 0));
+            const endTs = Math.max(...allSessions.map(s => getSessionTimestamp(s, 'last')).filter(ts => ts > 0));
+            const currentTs = Math.max(...windowSessions.map(s => getSessionTimestamp(s, 'last')).filter(ts => ts > 0));
+            document.getElementById('start-time').innerText = formatDate(new Date(startTs));
+            document.getElementById('current-time').innerText = formatDate(new Date(currentTs));
+            document.getElementById('end-time').innerText = formatDate(new Date(endTs));
+        }
+
+        updateMarkers();
+        updateChartsData(maxIdx);
+        updateLogFeed();
+        updateCountryReport();
+        updateTopPaths();
+        updateNotableDomains(allNotable);
+    });
 }
 
 function getPersistenceWindowMs() {
-    // Marker trail length, expressed as a fraction of the loaded time span.
-    // 100 => keep everything, 0 => only the newest session.
     const el = document.getElementById('persistence-slider');
     const pct = el ? parseInt(el.value, 10) : 100;
     if (!Number.isFinite(pct)) return Infinity;
@@ -375,143 +387,129 @@ function formatDuration(ms) {
     return Math.round(hrs / 24) + 'd';
 }
 
-function updateMarkers() {
-    markers.forEach(m => map.removeLayer(m));
-    markers = [];
+/* ---------- Filter system (path / IP / provider) ---------- */
 
-    // Markers accumulate: as the timeline advances, previously drawn markers
-    // stay on the map and new ones are added, up to MAX_MARKERS. Previously
-    // this redrew only the newest 150 sessions each time, so the map showed a
-    // rolling window rather than a growing trail.
-    const MAX_MARKERS = 2000;
-    const nowTs = allSessions.length
-        ? Math.max(...allSessions.slice(0, Math.floor((allSessions.length - 1) *
-            ((parseInt(document.getElementById('timeline-slider').value, 10)) / 100)) + 1)
-            .map(s => getSessionTimestamp(s, 'last'))
-            .filter(ts => Number.isFinite(ts) && ts > 0))
-        : 0;
-    const windowMs = getPersistenceWindowMs();
-    const cutoff = (windowMs === Infinity || !nowTs) ? -Infinity : nowTs - windowMs;
+function renderFilterControls() {
+    const container = document.getElementById('filter-controls');
+    const badge = document.getElementById('active-filter-badge');
+    const clearBtn = document.getElementById('clear-filter');
+    if (!container) return;
+    container.innerHTML = '';
 
-    const candidates = filteredSessions.filter(s => {
-        if (!s.geo || !s.geo.lat) return false;
-        if (windowMs === Infinity) return true;
-        const ts = getSessionTimestamp(s, 'last');
-        return Number.isFinite(ts) && ts >= cutoff;
+    const dims = [
+        { key: 'path', label: 'Path', catalog: filterCatalog.paths || {} },
+        { key: 'ip', label: 'IP', catalog: filterCatalog.ips || {} },
+        { key: 'provider', label: 'Provider', catalog: filterCatalog.providers || {} },
+    ];
+
+    dims.forEach(dim => {
+        const entries = Object.entries(dim.catalog)
+            .sort((a, b) => b[1].count - a[1].count)
+            .slice(0, 12);
+        if (!entries.length) return;
+
+        const group = document.createElement('div');
+        group.style.cssText = 'font-size:0.62rem; margin-bottom:6px;';
+        group.innerHTML = `<div style="color:var(--text-secondary); text-transform:uppercase; letter-spacing:0.04em; font-weight:700; margin-bottom:2px;">${dim.label}</div>`;
+
+        const row = document.createElement('div');
+        row.style.cssText = 'display:flex; flex-wrap:wrap; gap:4px;';
+        entries.forEach(([value, info]) => {
+            const active = activeFilters[dim.key] === value;
+            const btn = document.createElement('button');
+            btn.type = 'button';
+            btn.className = 'toggle-btn';
+            btn.style.cssText = `font-size:0.62rem; padding:2px 6px; border-radius:10px; background:${active ? 'var(--accent-color)' : 'rgba(255,255,255,0.06)'}; border:1px solid ${active ? 'var(--accent-color)' : 'rgba(255,255,255,0.08)'}; color:${active ? '#000' : 'var(--text-secondary)'}; cursor:pointer; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:150px; font-weight:${active ? '700' : '500'};`;
+            btn.title = `${dim.label}: ${value} (${info.count} sessions) ${active ? '(active, click to remove)' : ''}`;
+            btn.textContent = value.length > 30 ? value.slice(0, 27) + '…' : value;
+            btn.addEventListener('click', () => toggleFilter(dim.key, value));
+            row.appendChild(btn);
+        });
+        group.appendChild(row);
+        container.appendChild(group);
     });
 
-    // Most recent first, then keep the newest MAX_MARKERS.
-    candidates.sort((a, b) => getSessionTimestamp(b, 'last') - getSessionTimestamp(a, 'last'));
-    const toDraw = candidates.slice(0, MAX_MARKERS).reverse();
-
-    toDraw.forEach(s => {
-        const ttype = getTrafficType(s);
-        const color = TRAFFIC_COLORS[ttype];
-        const isBlocked = BLOCKED_COUNTRIES.includes(s.geo.country_code);
-        const blockedBadge = isBlocked ? '<span style="background: #f43f5e; color: #fff; padding: 1px 5px; border-radius: 3px; font-size: 0.65rem; font-weight: 700; letter-spacing: 0.05em; margin-left: 4px;">BLOCKED</span>' : '';
-
-        const popupContent = `
-            <div style="font-family: inherit; font-size: 0.8rem;">
-                <b style="color: var(--accent-color)">${s.origin_ip}</b>${blockedBadge}<br>
-                <span style="font-size: 0.7rem; opacity: 0.7;">Edge: ${s.edge_ip}</span><br>
-                <b>${s.geo.hostname || 'No RDNS'}</b><br>
-                ${s.geo.asn_name || ('AS' + (s.geo.asn || '?'))}<br>
-                ${s.geo.city || 'Unknown'}, ${s.geo.country}<br>
-                <div style="margin-top: 5px; border-top: 1px solid rgba(255,255,255,0.1); padding-top: 5px;">
-                    Intent: <span style="color: ${color}">${s.intent}</span><br>
-                    Hits: ${s.req_count} | Rate: ${s.req_rate} RPS
-                    ${s.is_malicious && s.tags && s.tags.length ? '<br><div style="margin-top:4px;">' + s.tags.map(t => `<span style="background:rgba(244,63,94,0.2);color:#f43f5e;padding:1px 4px;border-radius:2px;font-size:0.6rem;font-weight:600;margin-right:2px;">${t}</span>`).join('') + '</div>' : ''}
-                    ${s.is_malicious && s.path_summary && s.path_summary.length ? '<br><div style="font-family:monospace;font-size:0.6rem;color:#f43f5e;margin-top:3px;max-width:200px;">' + s.path_summary.slice(0,3).join('<br>') + (s.path_summary.length > 3 ? '<br>+' + (s.path_summary.length - 3) + ' more' : '') + '</div>' : ''}
-                </div>
-            </div>
-        `;
-
-        const marker = L.circleMarker([s.geo.lat, s.geo.lon], {
-            radius: Math.min(20, 5 + Math.sqrt(s.req_count)),
-            fillColor: color, color: color, weight: 1,
-            opacity: 0.8, fillOpacity: 0.4
-        }).bindPopup(popupContent);
-        
-        marker.addTo(map);
-        markers.push(marker);
-    });
+    updateFilterBadge();
+    const hasAny = Object.keys(activeFilters).length > 0;
+    if (clearBtn) clearBtn.style.display = hasAny ? 'inline-block' : 'none';
 }
 
-function updateChartsData(maxIdx) {
-    const legit = filteredSessions.filter(s => !s.geo.is_bot && !s.is_malicious && !s.geo.is_cloud && !s.geo.is_hosting).length;
-    const cloud = filteredSessions.filter(s => s.geo.is_cloud && !s.geo.is_bot && !s.geo.is_malicious).length;
-    const hosting = filteredSessions.filter(s => s.geo.is_hosting && !s.geo.is_bot && !s.geo.is_malicious).length;
-    const bots = filteredSessions.filter(s => s.geo.is_bot).length;
-    const malicious = filteredSessions.filter(s => s.is_malicious).length;
-    
-    // Update Labels as well in case they changed
-    typeChart.data.labels = ['Legit', 'Cloud', 'Hosting', 'Bots', 'Malicious'];
-    typeChart.data.datasets[0].data = [legit, cloud, hosting, bots, malicious];
-    typeChart.data.datasets[0].backgroundColor = ['#00f2ff', '#a855f7', '#22c55e', '#ffaa00', '#f43f5e'];
-    typeChart.update();
+function updateFilterBadge() {
+    const badge = document.getElementById('active-filter-badge');
+    const clearBtn = document.getElementById('clear-filter');
+    if (!badge) return;
+    const keys = Object.keys(activeFilters);
+    if (keys.length === 0) {
+        badge.textContent = '';
+        if (clearBtn) clearBtn.style.display = 'none';
+        return;
+    }
+    const label = { path: 'Path', ip: 'IP', provider: 'Provider' };
+    const parts = keys.map(k => `${label[k] || k} = ${activeFilters[k]}`);
+    badge.textContent = 'Filter: ' + parts.join(' + ');
+    badge.style.color = 'var(--accent-color)';
+    if (clearBtn) clearBtn.style.display = 'inline-block';
+}
 
-    const statusTotals = [0, 0, 0, 0]; // 2xx, 3xx, 4xx, 5xx
-    filteredSessions.forEach((s) => {
-        if (s.status_counts) {
-            statusTotals[0] += Number(s.status_counts['2xx'] || 0);
-            statusTotals[1] += Number(s.status_counts['3xx'] || 0);
-            statusTotals[2] += Number(s.status_counts['4xx'] || 0);
-            statusTotals[3] += Number(s.status_counts['5xx'] || 0);
-            return;
-        }
+function toggleFilter(dim, value) {
+    if (activeFilters[dim] === value) {
+        delete activeFilters[dim];
+    } else {
+        activeFilters[dim] = value;
+    }
+    updateFilterBadge();
+    applyFilters();
+}
 
-        // Legacy fallback: old datasets may not include per-status buckets.
-        if (s.is_malicious || isScannerTraffic(s)) {
-            statusTotals[2] += Number(s.req_count || 0);
-        } else {
-            statusTotals[0] += Number(s.req_count || 0);
-        }
-    });
-    statusChart.data.datasets[0].data = statusTotals;
-    statusChart.update();
-
-    const totalInWindow = Math.max(1, (typeof maxIdx === 'number' ? maxIdx + 1 : allSessions.length));
-    const bucketCount = Math.max(1, Math.min(30, totalInWindow));
-    const bucketSize = Math.max(1, Math.ceil(totalInWindow / bucketCount));
-    const requestData = new Array(bucketCount).fill(0);
-    const ipSets = Array.from({ length: bucketCount }, () => new Set());
-    const bucketTimeRanges = Array.from({ length: bucketCount }, () => ({ start: 0, end: 0 }));
-
-    for (let i = 0; i < totalInWindow; i++) {
-        const s = allSessions[i];
-        const bucketIdx = Math.min(bucketCount - 1, Math.floor(i / bucketSize));
-        const ts = getSessionTimestamp(s, 'last');
-
-        if (!bucketTimeRanges[bucketIdx].start || ts < bucketTimeRanges[bucketIdx].start) bucketTimeRanges[bucketIdx].start = ts;
-        if (ts > bucketTimeRanges[bucketIdx].end) bucketTimeRanges[bucketIdx].end = ts;
-
-        if (!sessionMatchesCurrentFilter(s)) continue;
-        requestData[bucketIdx] += Number(s.req_count || 0);
-        ipSets[bucketIdx].add(s.origin_ip);
+async function applyFilters() {
+    const keys = Object.keys(activeFilters);
+    if (keys.length === 0) {
+        rebuildAllSessions();
+        document.getElementById('timeline-slider').value = 100;
+        updateDashboard();
+        renderFilterControls();
+        return;
     }
 
-    const ipLineData = ipSets.map(set => set.size);
-    const labels = bucketTimeRanges.map(range => formatBucketLabel(range.end || range.start));
-
-    volumeChart.data.labels = labels;
-    volumeChart.data.datasets[0].data = requestData;
-    volumeChart.data.datasets[1].data = ipLineData;
-    volumeChart.update();
+    // Union of shards across all active filter values.
+    const shardSet = new Set();
+    for (const dim of keys) {
+        const entries = (filterCatalog[dim + 's'] || {})[activeFilters[dim]];
+        if (entries && entries.shards) {
+            entries.shards.forEach(i => shardSet.add(i));
+        }
+    }
+    await Promise.all([...shardSet].map(i => fetchShard(i)));
+    rebuildAllSessions();
+    document.getElementById('timeline-slider').value = 100;
+    updateDashboard();
+    renderFilterControls();
 }
+
+document.addEventListener('click', (e) => {
+    if (e.target && e.target.id === 'clear-filter') {
+        Object.keys(activeFilters).forEach(k => delete activeFilters[k]);
+        updateFilterBadge();
+        rebuildAllSessions();
+        document.getElementById('timeline-slider').value = 100;
+        updateDashboard();
+        renderFilterControls();
+    }
+});
 
 const IGNORED_RDNS = ['censys-scanner.com', 'internet-measurement.com'];
 
 const CLOUD_PROVIDERS = {
-    'Amazon':      ['AS14618', 'AS16509'],
-    'Google':      ['AS396982', 'AS15169'],
-    'Microsoft':   ['AS8075'],
-    'Cloudflare':  ['AS13335', 'AS132892'],
-    'DigitalOcean':['AS14061'],
-    'Akamai':      ['AS63949'],
-    'OVH':         ['AS16276'],
-    'Hetzner':     ['AS24940'],
-    'Contabo':     ['AS141995', 'AS51167', 'AS40021'],
-    'Alibaba':     ['AS37963']
+    'Amazon': ['AS14618', 'AS16509'],
+    'Google': ['AS396982', 'AS15169'],
+    'Microsoft': ['AS8075'],
+    'Cloudflare': ['AS13335', 'AS132892'],
+    'DigitalOcean': ['AS14061'],
+    'Akamai': ['AS63949'],
+    'OVH': ['AS16276'],
+    'Hetzner': ['AS24940'],
+    'Contabo': ['AS141995', 'AS51167', 'AS40021'],
+    'Alibaba': ['AS37963']
 };
 
 function getASN(label) {
@@ -573,6 +571,14 @@ const MALICIOUS_PATHS = [
 ];
 
 function isScannerTraffic(session) {
+    if (Array.isArray(session.failed_scanner_paths)) {
+        const successfulPaths = new Set(session.successful_paths || []);
+        return session.failed_scanner_paths.some(p =>
+            !successfulPaths.has(p) && MALICIOUS_PATHS.some(rx => rx.test(p))
+        );
+    }
+    const successful = Number(session.status_counts?.['2xx'] || 0);
+    if (successful > 0) return false;
     return session.path_summary && session.path_summary.some(p =>
         MALICIOUS_PATHS.some(rx => rx.test(p))
     );
@@ -588,9 +594,7 @@ function getTrafficType(session) {
 
 function buildIpTypeMap() {
     const ipMap = {};
-    allSessions.forEach(s => {
-        ipMap[s.origin_ip] = getTrafficType(s);
-    });
+    allSessions.forEach(s => { ipMap[s.origin_ip] = getTrafficType(s); });
     return ipMap;
 }
 
@@ -632,31 +636,39 @@ function getSearchQuery(notable) {
     return m ? m[0] : notable.label;
 }
 
+function shortLabel(label) {
+    return label
+        .replace(/^(RDNS|ASN): /, '')
+        .replace(/ \(unverified\)/, '')
+        .replace(/ \| Actor: unknown/, '')
+        .replace(/ \| Confidence: /, ' | ');
+}
+
 function renderNotableList(items, limit) {
     const ipMap = buildIpTypeMap();
     const geoMap = buildIpGeoMap();
     const list = limit ? items.slice(0, limit) : items;
     const isModal = !limit;
     return list.map(n => {
-        const shortLabel = n.label.replace(/^(RDNS|ASN): /, '').replace(/ \(unverified\)/, '').replace(/ \| Actor: unknown/, '').replace(/ \| Confidence: /, ' | ');
         const dominant = getDominantType(n.ips, ipMap);
         const color = TRAFFIC_COLORS[dominant];
+        const locations = getTopLocations(n.ips, geoMap, 3);
+        const locStr = locations.length ? locations.join(' / ') : 'Unknown';
+        const query = encodeURIComponent(getSearchQuery(n));
+        const ipsAttr = (n.ips || []).join(',');
+        const short = shortLabel(n.label);
         if (!isModal) {
             return `<div style="margin-bottom: 0.75rem; border-bottom: 1px solid rgba(255,255,255,0.05); padding-bottom: 0.5rem;">
                 <div style="display: flex; justify-content: space-between; font-size: 0.75rem;">
-                    <span title="${n.label}" style="color: ${color}; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 180px;">${shortLabel}</span>
+                    <span title="${n.label}" style="color: ${color}; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 180px;">${short}</span>
                     <span style="color: ${color}; white-space: nowrap; margin-left: 8px;">${n.count} IPs</span>
                 </div>
             </div>`;
         }
-        const locations = getTopLocations(n.ips, geoMap, 3);
-        const locStr = locations.length ? locations.join(' / ') : 'Unknown';
-        const query = encodeURIComponent(getSearchQuery(n));
-        const ipsAttr = n.ips.map(ip => ip).join(',');
         return `<div class="notable-row" data-ips="${ipsAttr}" style="margin-bottom: 0.75rem; border-bottom: 1px solid rgba(255,255,255,0.05); padding-bottom: 0.5rem; cursor: pointer;">
             <div style="display: flex; justify-content: space-between; align-items: baseline; font-size: 0.8rem;">
                 <div style="min-width: 0; flex: 1;">
-                    <a href="https://www.google.com/search?q=${query}" target="_blank" rel="noopener" style="color: ${color}; text-decoration: none; border-bottom: 1px dashed rgba(255,255,255,0.15);" title="Search Google for ${query}" onclick="event.stopPropagation();">${shortLabel}</a>
+                    <a href="https://www.google.com/search?q=${query}" target="_blank" rel="noopener" style="color: ${color}; text-decoration: none; border-bottom: 1px dashed rgba(255,255,255,0.15);" title="Search Google for ${query}" onclick="event.stopPropagation();">${short}</a>
                     <i data-lucide="chevron-down" style="width: 12px; height: 12px; display: inline-block; vertical-align: -2px; opacity: 0.4; margin-left: 4px;"></i>
                     <div style="font-size: 0.7rem; color: var(--text-secondary); margin-top: 2px;">
                         <i data-lucide="map-pin" style="width: 10px; height: 10px; display: inline-block; vertical-align: -1px;"></i> ${locStr}
@@ -675,25 +687,19 @@ function renderIpDetailTable(ipList) {
         if (!ipList.includes(s.origin_ip)) return;
         if (!sessionsByIp[s.origin_ip]) {
             sessionsByIp[s.origin_ip] = {
-                ip: s.origin_ip,
-                reqs: 0,
-                hostname: s.geo.hostname || '',
-                city: s.geo.city || '',
-                cc: s.geo.country_code || '',
-                asn: s.geo.asn || '',
-                asnName: s.geo.asn_name || '',
-                type: getTrafficType(s),
-                firstSeen: s.first_seen_iso,
-                lastSeen: s.last_seen_iso,
-                paths: new Set()
+                ip: s.origin_ip, reqs: 0, hostname: s.geo.hostname || '',
+                city: s.geo.city || '', cc: s.geo.country_code || '',
+                asn: s.geo.asn || '', asnName: s.geo.asn_name || '',
+                type: getTrafficType(s), firstSeen: s.first_seen_iso,
+                lastSeen: s.last_seen_iso, paths: new Set()
             };
         }
-        sessionsByIp[s.origin_ip].reqs += s.req_count;
+        sessionsByIp[s.origin_ip].reqs += s.req_count || 0;
         if (s.last_seen_iso > sessionsByIp[s.origin_ip].lastSeen) sessionsByIp[s.origin_ip].lastSeen = s.last_seen_iso;
         if (s.first_seen_iso < sessionsByIp[s.origin_ip].firstSeen) sessionsByIp[s.origin_ip].firstSeen = s.first_seen_iso;
         if (!sessionsByIp[s.origin_ip].asn && s.geo.asn) sessionsByIp[s.origin_ip].asn = s.geo.asn;
         if (!sessionsByIp[s.origin_ip].asnName && s.geo.asn_name) sessionsByIp[s.origin_ip].asnName = s.geo.asn_name;
-        s.path_summary.forEach(p => sessionsByIp[s.origin_ip].paths.add(p));
+        (s.path_summary || []).forEach(p => sessionsByIp[s.origin_ip].paths.add(p));
     });
     const ips = Object.values(sessionsByIp).sort((a, b) => b.reqs - a.reqs);
     if (!ips.length) return '<div style="font-size: 0.7rem; color: var(--text-secondary); padding: 8px 0;">No sessions in current filter</div>';
@@ -706,31 +712,30 @@ function renderIpDetailTable(ipList) {
             <th style="text-align: left; padding: 4px 6px; color: var(--text-secondary); border-bottom: 1px solid var(--border-color);">Paths</th>
         </tr></thead>
         <tbody>${ips.map(ip => {
-            const color = TRAFFIC_COLORS[ip.type];
-            const isBlocked = BLOCKED_COUNTRIES.includes(ip.cc) || ip.type === 'malicious';
-            const blk = isBlocked ? ' <span style="background: #f43f5e; color: #fff; padding: 0 2px; border-radius: 2px; font-size: 0.55rem; font-weight: 700;">BLK</span>' : '';
-            const pathList = [...ip.paths].slice(0, 3).join(', ') + (ip.paths.size > 3 ? ' (+' + (ip.paths.size - 3) + ')' : '');
-            const ts = ip.lastSeen.replace('T', ' ').split('.')[0];
-            const asnLabel = ip.asn ? `AS${ip.asn}${ip.asnName ? ' · ' + escapeHtml(ip.asnName) : ''}` : (ip.asnName ? escapeHtml(ip.asnName) : 'ASN unknown');
-            const firstTs = (ip.firstSeen || '').replace('T', ' ').split('.')[0];
-            const firstDate = firstTs.split(' ')[0] || firstTs || 'unknown';
-            const lastDate = ts.split(' ')[0] || ts || 'unknown';
-            const seenRange = firstDate === lastDate ? firstDate : `${firstDate} → ${lastDate}`;
-            return `<tr>
-                <td style="padding: 4px 6px; border-bottom: 1px solid rgba(255,255,255,0.03);">
-                    <a href="https://ipinfo.io/${ip.ip}" target="_blank" style="color: ${color}; text-decoration: none;">${ip.ip}</a>${blk}
-                    ${ip.hostname ? '<div style="color: var(--text-secondary); font-size: 0.65rem;">' + ip.hostname + '</div>' : ''}
-                    ${ip.city ? '<div style="color: var(--text-secondary); font-size: 0.65rem;">' + ip.city + '</div>' : ''}
-                    <div style="color: var(--text-secondary); font-size: 0.65rem;">${asnLabel}</div>
-                    <div style="color: var(--text-secondary); font-size: 0.65rem;">Seen: ${seenRange}</div>
-                </td>
-                <td style="padding: 4px 6px; border-bottom: 1px solid rgba(255,255,255,0.03); color: ${color};">${ip.type}</td>
-                <td style="padding: 4px 6px; border-bottom: 1px solid rgba(255,255,255,0.03); text-align: right;">${ip.reqs}</td>
-                <td style="padding: 4px 6px; border-bottom: 1px solid rgba(255,255,255,0.03); white-space: nowrap;">${ts}</td>
-                <td style="padding: 4px 6px; border-bottom: 1px solid rgba(255,255,255,0.03); color: var(--text-secondary);" title="${[...ip.paths].join(', ')}">${pathList}</td>
-            </tr>`;
-        }).join('')}</tbody>
-    </table>`;
+        const color = TRAFFIC_COLORS[ip.type];
+        const isBlocked = BLOCKED_COUNTRIES.includes(ip.cc) || ip.type === 'malicious';
+        const blk = isBlocked ? ' <span style="background: #f43f5e; color: #fff; padding: 0 2px; border-radius: 2px; font-size: 0.55rem; font-weight: 700;">BLK</span>' : '';
+        const pathList = [...ip.paths].slice(0, 3).join(', ') + (ip.paths.size > 3 ? ' (+' + (ip.paths.size - 3) + ')' : '');
+        const ts = ip.lastSeen.replace('T', ' ').split('.')[0];
+        const asnLabel = ip.asn ? `AS${ip.asn}${ip.asnName ? ' · ' + escapeHtml(ip.asnName) : ''}` : (ip.asnName ? escapeHtml(ip.asnName) : 'ASN unknown');
+        const firstTs = (ip.firstSeen || '').replace('T', ' ').split('.')[0];
+        const firstDate = firstTs.split(' ')[0] || firstTs || 'unknown';
+        const lastDate = ts.split(' ')[0] || ts || 'unknown';
+        const seenRange = firstDate === lastDate ? firstDate : `${firstDate} → ${lastDate}`;
+        return `<tr>
+            <td style="padding: 4px 6px; border-bottom: 1px solid rgba(255,255,255,0.03);">
+                <a href="https://ipinfo.io/${ip.ip}" target="_blank" style="color: ${color}; text-decoration: none;">${ip.ip}</a>${blk}
+                ${ip.hostname ? '<div style="color: var(--text-secondary); font-size: 0.65rem;">' + ip.hostname + '</div>' : ''}
+                ${ip.city ? '<div style="color: var(--text-secondary); font-size: 0.65rem;">' + ip.city + '</div>' : ''}
+                <div style="color: var(--text-secondary); font-size: 0.65rem;">${asnLabel}</div>
+                <div style="color: var(--text-secondary); font-size: 0.65rem;">Seen: ${seenRange}</div>
+            </td>
+            <td style="padding: 4px 6px; border-bottom: 1px solid rgba(255,255,255,0.03); color: ${color};">${ip.type}</td>
+            <td style="padding: 4px 6px; border-bottom: 1px solid rgba(255,255,255,0.03); text-align: right;">${ip.reqs}</td>
+            <td style="padding: 4px 6px; border-bottom: 1px solid rgba(255,255,255,0.03); white-space: nowrap;">${ts}</td>
+            <td style="padding: 4px 6px; border-bottom: 1px solid rgba(255,255,255,0.03); color: var(--text-secondary);" title="${[...ip.paths].join(', ')}">${pathList}</td>
+        </tr>`;
+    }).join('')}</tbody></table>`;
 }
 
 function addToggleAllButton(container, rowClass, detailClass, isInitiallyExpanded, onExpand, getIpsFn) {
@@ -764,7 +769,7 @@ function addToggleAllButton(container, rowClass, detailClass, isInitiallyExpande
     let expanded = isInitiallyExpanded;
     btn.innerHTML = `<i data-lucide="${expanded ? 'fold-vertical' : 'unfold-vertical'}" style="width: 14px; height: 14px; margin-right: 6px; vertical-align: -2px;"></i>${expanded ? 'Collapse All' : 'Expand All'}`;
     btn.style.cssText = 'background: rgba(255,255,255,0.1); border: 1px solid rgba(255,255,255,0.1); color: var(--text-primary); padding: 4px 12px; border-radius: 4px; font-size: 0.75rem; cursor: pointer; transition: all 0.2s; font-weight: 500; font-family: inherit; display: inline-flex; align-items: center;';
-    
+
     btn.addEventListener('mouseover', () => btn.style.background = 'rgba(255,255,255,0.15)');
     btn.addEventListener('mouseout', () => btn.style.background = 'rgba(255,255,255,0.1)');
 
@@ -808,20 +813,15 @@ function attachDrillDown(container) {
         const expand = () => {
             if (!detail) return;
             detail.innerHTML = renderIpDetailTable(ips);
-            if (!detail.innerHTML) detail.innerHTML = renderIpDetailTable(ips);
             detail.style.display = 'block';
         };
 
-        // Expanded by default so selecting/copying doesn't collapse the detail panel.
         expand();
 
         row.addEventListener('click', (e) => {
             if (e.target.closest('a')) return;
-
-            // Ignore clicks that are part of text selection/copy interactions.
             const selectedText = window.getSelection ? window.getSelection().toString() : '';
             if (selectedText && selectedText.trim().length > 0) return;
-
             if (detail && detail.style.display === 'none') {
                 expand();
             } else if (detail) {
@@ -844,11 +844,7 @@ function getVisibleNotables(items) {
     return items
         .map(n => {
             const visibleItemIps = (n.ips || []).filter(ip => visibleIps.has(ip));
-            return {
-                ...n,
-                ips: visibleItemIps,
-                count: visibleItemIps.length
-            };
+            return { ...n, ips: visibleItemIps, count: visibleItemIps.length };
         })
         .filter(n => n.count > 0);
 }
@@ -857,23 +853,21 @@ function updateNotableDomains(notable) {
     const sidebarContainer = document.getElementById('notable-domains');
     if (!sidebarContainer || !notable) return;
 
-    const { rdns, cloud, otherHosting } = categorizeNotable(notable);
-    const visibleRdns = sortNotablesByCount(getVisibleNotables(rdns));
-    const visibleCloud = sortNotablesByCount(getVisibleNotables(cloud));
-    const visibleOtherHosting = sortNotablesByCount(getVisibleNotables(otherHosting));
+    // Use precomputed topNotables from summary (small). The full list loads
+    // on demand when the modal opens.
+    const src = topNotables || { rdns: [], cloud: [], otherHosting: [] };
+    const sections = [
+        { list: src.rdns, label: 'rDNS', color: 'var(--accent-color)', limit: 4 },
+        { list: src.cloud, label: 'Cloud Providers', color: '#a855f7', limit: 4 },
+        { list: src.otherHosting, label: 'Other Hosting', color: '#22c55e', limit: 3 }
+    ];
     let html = '';
-    if (visibleRdns.length) {
-        html += renderSectionHeader('rDNS', visibleRdns.length, 'var(--accent-color)');
-        html += renderNotableList(visibleRdns, 4);
-    }
-    if (visibleCloud.length) {
-        html += renderSectionHeader('Cloud Providers', visibleCloud.length, '#a855f7');
-        html += renderNotableList(visibleCloud, 4);
-    }
-    if (visibleOtherHosting.length) {
-        html += renderSectionHeader('Other Hosting', visibleOtherHosting.length, '#22c55e');
-        html += renderNotableList(visibleOtherHosting, 3);
-    }
+    sections.forEach(sec => {
+        const visible = sortNotablesByCount(getVisibleNotables(sec.list));
+        if (!visible.length) return;
+        html += renderSectionHeader(sec.label, visible.length, sec.color);
+        html += renderNotableList(visible, sec.limit);
+    });
     sidebarContainer.innerHTML = html;
 }
 
@@ -897,9 +891,9 @@ function updateLogFeed() {
             ? tags.map(t => `<span style="display:inline-block;background:rgba(244,63,94,0.15);color:#f43f5e;padding:1px 5px;border-radius:3px;font-size:0.6rem;font-weight:600;margin:1px 2px 1px 0;white-space:nowrap;">${t}</span>`).join('')
             : '<span class="badge" style="background: rgba(255,255,255,0.05)">Cluster</span>';
         const probePathsHtml = isMalBlocked
-            ? s.path_summary.slice(0, 4).map(p => `<div style="font-family:monospace;font-size:0.65rem;color:#f43f5e;opacity:0.85;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:220px;" title="${p}">${p}</div>`).join('')
-                + (s.path_summary.length > 4 ? `<div style="font-size:0.6rem;color:var(--text-secondary);opacity:0.6">+${s.path_summary.length - 4} more paths</div>` : '')
-            : `<span title="${s.path_summary.join(', ')}">${s.path_summary[0] || '/'}${s.path_summary.length > 1 ? ' (+'+(s.path_summary.length-1)+')' : ''}</span>`;
+            ? (s.path_summary || []).slice(0, 4).map(p => `<div style="font-family:monospace;font-size:0.65rem;color:#f43f5e;opacity:0.85;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:220px;" title="${escapeHtml(p)}">${escapeHtml(p)}</div>`).join('')
+                + ((s.path_summary || []).length > 4 ? `<div style="font-size:0.6rem;color:var(--text-secondary);opacity:0.6">+${(s.path_summary || []).length - 4} more paths</div>` : '')
+            : `<span title="${escapeHtml((s.path_summary || []).join(', '))}">${escapeHtml((s.path_summary || [])[0] || '/')}${(s.path_summary || []).length > 1 ? ' (+' + ((s.path_summary || []).length - 1) + ')' : ''}</span>`;
         tr.innerHTML = `
             <td>
                 <div style="font-weight: 600; color: ${color}">
@@ -911,7 +905,7 @@ function updateLogFeed() {
             <td style="min-width:110px;vertical-align:top;">${evidenceCell}</td>
             <td style="vertical-align:top;">${probePathsHtml}</td>
             <td><span style="color: ${ttype === 'malicious' ? '#f43f5e' : '#10b981'}">${s.req_count} reqs</span></td>
-            <td style="color: var(--text-secondary); white-space: nowrap;">${s.last_seen_iso.replace('T', ' ').split('.')[0]}</td>
+            <td style="color: var(--text-secondary); white-space: nowrap;">${(s.last_seen_iso || '').replace('T', ' ').split('.')[0]}</td>
         `;
         feed.appendChild(tr);
     });
@@ -927,8 +921,8 @@ function updateCountryReport() {
         if (!countries[c]) {
             countries[c] = { name: s.geo.country || 'Unknown', total: 0, mal: 0, ips: new Set(), blockedIps: new Set() };
         }
-        countries[c].total += s.req_count;
-        if (s.is_malicious || isScannerTraffic(s)) countries[c].mal += s.req_count;
+        countries[c].total += s.req_count || 0;
+        if (s.is_malicious || isScannerTraffic(s)) countries[c].mal += s.req_count || 0;
         countries[c].ips.add(s.origin_ip);
         if (BLOCKED_COUNTRIES.includes(c) || s.is_malicious || isScannerTraffic(s)) {
             countries[c].blockedIps.add(s.origin_ip);
@@ -951,8 +945,8 @@ function updateCountryReport() {
             </div>
             <div style="font-size: 0.65rem; color: var(--text-secondary); margin-bottom: 3px;">${blockedLabel}${e.ipCount} IPs</div>
             <div style="display: flex; height: 6px; border-radius: 3px; overflow: hidden; background: rgba(255,255,255,0.05);">
-                <div style="width: ${((e.total - e.mal)/e.total*100)}%; background: #00f2ff;"></div>
-                <div style="width: ${(e.mal/e.total*100)}%; background: #f43f5e;"></div>
+                <div style="width: ${((e.total - e.mal) / e.total * 100)}%; background: #00f2ff;"></div>
+                <div style="width: ${(e.mal / e.total * 100)}%; background: #f43f5e;"></div>
             </div>
         </div>`;
     }).join('');
@@ -971,33 +965,22 @@ let _topPathCache = { key: null, value: [] };
 let topPathSort = { key: 'count', dir: -1 };
 
 function getTopPathEntries() {
-    // Cache by (timeline position, filter). Without this the aggregation ran on
-    // every slider input event, which is wasteful for a result that only
-    // changes when the visible window or filter changes.
     const sliderVal = document.getElementById('timeline-slider');
     const key = `${currentFilter}:${sliderVal ? sliderVal.value : ''}`;
     if (_topPathCache.key === key) return _topPathCache.value;
 
     const pathMap = {};
-
     filteredSessions.forEach((s) => {
         const ttype = getTrafficType(s);
         if (!(ttype === 'malicious' || ttype === 'bot' || isScannerTraffic(s))) return;
 
-        // Prefer the authoritative per-path breakdown from the analyzer.
-        // Fall back to path_summary for older data that predates path_stats.
         const stats = (s.path_stats && Object.keys(s.path_stats).length)
             ? Object.entries(s.path_stats).map(([p, v]) => ({ path: p, hits: v.hits, status: v.status }))
             : (s.path_summary || []).map(p => ({ path: p, hits: Number(s.req_count || 0), status: null }));
 
         stats.forEach(({ path, hits, status }) => {
             if (!pathMap[path]) {
-                pathMap[path] = {
-                    path,
-                    count: 0,
-                    ips: new Set(),
-                    statuses: {}
-                };
+                pathMap[path] = { path, count: 0, ips: new Set(), statuses: {} };
             }
             pathMap[path].count += Number(hits || 0);
             pathMap[path].ips.add(s.origin_ip);
@@ -1009,7 +992,6 @@ function getTopPathEntries() {
 
     const result = Object.values(pathMap)
         .map((entry) => {
-            // Most frequent status first; ties broken by code for stability.
             const topStatus = Object.entries(entry.statuses).length
                 ? Object.entries(entry.statuses).sort((a, b) => (b[1] - a[1]) || a[0].localeCompare(b[0]))[0][0]
                 : null;
@@ -1034,7 +1016,6 @@ function sortTopPathEntries(entries) {
         if (key === 'path') return dir * a.path.localeCompare(b.path);
         if (key === 'ipCount') return dir * (a.ipCount - b.ipCount);
         if (key === 'status') {
-            // Unknown statuses sort last regardless of direction.
             const av = a.status || '', bv = b.status || '';
             if (av === '' && bv !== '') return 1;
             if (bv === '' && av !== '') return -1;
@@ -1066,17 +1047,12 @@ function topPathSortHeader(label, sortKey, align) {
 
 function renderPathIpDetailTable(path) {
     const sessionsByIp = {};
-
     const windowSeenByIp = {};
     filteredSessions.forEach((s) => {
         if (!windowSeenByIp[s.origin_ip]) {
-            windowSeenByIp[s.origin_ip] = {
-                firstSeen: s.first_seen_iso,
-                lastSeen: s.last_seen_iso
-            };
+            windowSeenByIp[s.origin_ip] = { firstSeen: s.first_seen_iso, lastSeen: s.last_seen_iso };
             return;
         }
-
         if (s.first_seen_iso < windowSeenByIp[s.origin_ip].firstSeen) {
             windowSeenByIp[s.origin_ip].firstSeen = s.first_seen_iso;
         }
@@ -1087,24 +1063,15 @@ function renderPathIpDetailTable(path) {
 
     filteredSessions.forEach((s) => {
         if (!(s.path_summary || []).includes(path)) return;
-
         if (!sessionsByIp[s.origin_ip]) {
             const seenWindow = windowSeenByIp[s.origin_ip] || { firstSeen: s.first_seen_iso, lastSeen: s.last_seen_iso };
             sessionsByIp[s.origin_ip] = {
-                ip: s.origin_ip,
-                hits: 0,
-                sessions: 0,
-                hostname: s.geo.hostname || '',
-                city: s.geo.city || '',
-                cc: s.geo.country_code || '',
-                asn: s.geo.asn || '',
-                asnName: s.geo.asn_name || '',
-                type: getTrafficType(s),
-                firstSeen: seenWindow.firstSeen,
-                lastSeen: seenWindow.lastSeen
+                ip: s.origin_ip, hits: 0, sessions: 0, hostname: s.geo.hostname || '',
+                city: s.geo.city || '', cc: s.geo.country_code || '',
+                asn: s.geo.asn || '', asnName: s.geo.asn_name || '',
+                type: getTrafficType(s), firstSeen: seenWindow.firstSeen, lastSeen: seenWindow.lastSeen
             };
         }
-
         sessionsByIp[s.origin_ip].hits += Number(s.req_count || 0);
         sessionsByIp[s.origin_ip].sessions += 1;
         if (!sessionsByIp[s.origin_ip].asn && s.geo.asn) sessionsByIp[s.origin_ip].asn = s.geo.asn;
@@ -1125,30 +1092,29 @@ function renderPathIpDetailTable(path) {
             <th style="text-align: left; padding: 4px 6px; color: var(--text-secondary); border-bottom: 1px solid var(--border-color);">Last Seen</th>
         </tr></thead>
         <tbody>${ips.map(ip => {
-            const color = TRAFFIC_COLORS[ip.type];
-            const isBlocked = BLOCKED_COUNTRIES.includes(ip.cc) || ip.type === 'malicious';
-            const blk = isBlocked ? ' <span style="background: #f43f5e; color: #fff; padding: 0 2px; border-radius: 2px; font-size: 0.55rem; font-weight: 700;">BLK</span>' : '';
-            const ts = ip.lastSeen.replace('T', ' ').split('.')[0];
-            const asnLabel = ip.asn ? `AS${ip.asn}${ip.asnName ? ' · ' + escapeHtml(ip.asnName) : ''}` : (ip.asnName ? escapeHtml(ip.asnName) : 'ASN unknown');
-            const firstTs = (ip.firstSeen || '').replace('T', ' ').split('.')[0];
-            const firstDate = firstTs.split(' ')[0] || firstTs || 'unknown';
-            const lastDate = ts.split(' ')[0] || ts || 'unknown';
-            const seenRange = firstDate === lastDate ? firstDate : `${firstDate} → ${lastDate}`;
-            return `<tr>
-                <td style="padding: 4px 6px; border-bottom: 1px solid rgba(255,255,255,0.03);">
-                    <a href="https://ipinfo.io/${ip.ip}" target="_blank" style="color: ${color}; text-decoration: none;">${ip.ip}</a>${blk}
-                    ${ip.hostname ? '<div style="color: var(--text-secondary); font-size: 0.65rem;">' + escapeHtml(ip.hostname) + '</div>' : ''}
-                    ${ip.city ? '<div style="color: var(--text-secondary); font-size: 0.65rem;">' + escapeHtml(ip.city) + '</div>' : ''}
-                    <div style="color: var(--text-secondary); font-size: 0.65rem;">${asnLabel}</div>
-                    <div style="color: var(--text-secondary); font-size: 0.65rem;">Seen: ${seenRange}</div>
-                </td>
-                <td style="padding: 4px 6px; border-bottom: 1px solid rgba(255,255,255,0.03); color: ${color};">${ip.type}</td>
-                <td style="padding: 4px 6px; border-bottom: 1px solid rgba(255,255,255,0.03); text-align: right;">${ip.hits}</td>
-                <td style="padding: 4px 6px; border-bottom: 1px solid rgba(255,255,255,0.03); text-align: right;">${ip.sessions}</td>
-                <td style="padding: 4px 6px; border-bottom: 1px solid rgba(255,255,255,0.03); white-space: nowrap;">${ts}</td>
-            </tr>`;
-        }).join('')}</tbody>
-    </table>`;
+        const color = TRAFFIC_COLORS[ip.type];
+        const isBlocked = BLOCKED_COUNTRIES.includes(ip.cc) || ip.type === 'malicious';
+        const blk = isBlocked ? ' <span style="background: #f43f5e; color: #fff; padding: 0 2px; border-radius: 2px; font-size: 0.55rem; font-weight: 700;">BLK</span>' : '';
+        const ts = ip.lastSeen.replace('T', ' ').split('.')[0];
+        const asnLabel = ip.asn ? `AS${ip.asn}${ip.asnName ? ' · ' + escapeHtml(ip.asnName) : ''}` : (ip.asnName ? escapeHtml(ip.asnName) : 'ASN unknown');
+        const firstTs = (ip.firstSeen || '').replace('T', ' ').split('.')[0];
+        const firstDate = firstTs.split(' ')[0] || firstTs || 'unknown';
+        const lastDate = ts.split(' ')[0] || ts || 'unknown';
+        const seenRange = firstDate === lastDate ? firstDate : `${firstDate} → ${lastDate}`;
+        return `<tr>
+            <td style="padding: 4px 6px; border-bottom: 1px solid rgba(255,255,255,0.03);">
+                <a href="https://ipinfo.io/${ip.ip}" target="_blank" style="color: ${color}; text-decoration: none;">${ip.ip}</a>${blk}
+                ${ip.hostname ? '<div style="color: var(--text-secondary); font-size: 0.65rem;">' + escapeHtml(ip.hostname) + '</div>' : ''}
+                ${ip.city ? '<div style="color: var(--text-secondary); font-size: 0.65rem;">' + escapeHtml(ip.city) + '</div>' : ''}
+                <div style="color: var(--text-secondary); font-size: 0.65rem;">${asnLabel}</div>
+                <div style="color: var(--text-secondary); font-size: 0.65rem;">Seen: ${seenRange}</div>
+            </td>
+            <td style="padding: 4px 6px; border-bottom: 1px solid rgba(255,255,255,0.03); color: ${color};">${ip.type}</td>
+            <td style="padding: 4px 6px; border-bottom: 1px solid rgba(255,255,255,0.03); text-align: right;">${ip.hits}</td>
+            <td style="padding: 4px 6px; border-bottom: 1px solid rgba(255,255,255,0.03); text-align: right;">${ip.sessions}</td>
+            <td style="padding: 4px 6px; border-bottom: 1px solid rgba(255,255,255,0.03); white-space: nowrap;">${ts}</td>
+        </tr>`;
+    }).join('')}</tbody></table>`;
 }
 
 function attachPathDrillDown(container) {
@@ -1177,23 +1143,15 @@ function attachPathDrillDown(container) {
             const encodedPath = row.dataset.path || '';
             const path = decodeURIComponent(encodedPath);
             detail.innerHTML = renderPathIpDetailTable(path);
-            if (!detail.innerHTML) {
-                const encodedPath = row.dataset.path || '';
-                const path = decodeURIComponent(encodedPath);
-                detail.innerHTML = renderPathIpDetailTable(path);
-            }
             detail.style.display = 'block';
         };
 
-        // Expanded by default for quick visibility and easier copy/select.
         expand();
 
         row.addEventListener('click', (e) => {
             if (e.target.closest('a')) return;
-
             const selectedText = window.getSelection ? window.getSelection().toString() : '';
             if (selectedText && selectedText.trim().length > 0) return;
-
             if (detail.style.display === 'none') {
                 expand();
             } else {
@@ -1229,13 +1187,11 @@ function updateTopPaths() {
         `;
     });
     html += '</tbody></table>';
-
     if (entries.length === 0) {
         html = '<div style="font-size: 0.75rem; color: var(--text-secondary); text-align: center; padding: 1rem 0;">No scanner paths found</div>';
     } else if (allEntries.length > 50) {
         html += `<div style="font-size: 0.7rem; color: var(--text-secondary); text-align: center; padding: 4px 0;">+${allEntries.length - 50} more — see full report</div>`;
     }
-
     tableDiv.innerHTML = html;
 
     tableDiv.querySelectorAll('.paths-sort-header [data-sort-key]').forEach(el => {
@@ -1269,10 +1225,6 @@ function renderPathsModalBody() {
     const CHUNK = 250;
     let i = 0;
 
-    // The sort header is a STABLE element; only the row list below it is
-    // replaced. Previously the header was part of the chunked HTML, so each
-    // chunk replaced the node under the user's cursor mid-click and the click
-    // landed on the overlay, which closes the modal.
     const list = document.createElement('div');
     list.className = 'paths-sort-list';
     body.innerHTML = '';
@@ -1335,11 +1287,10 @@ function renderPathsModalBody() {
 
 function setupEvents() {
     const timelineSlider = document.getElementById('timeline-slider');
-    timelineSlider.addEventListener('input', updateDashboard);
+    timelineSlider.addEventListener('input', () => {
+        updateDashboard();
+    });
 
-    // Click anywhere on the timeline track to jump the playhead there.
-    // Native range inputs only move on direct thumb drag, so clicking the
-    // track either does nothing or jumps by a coarse step.
     const jumpToPointer = (e) => {
         const track = timelineSlider.getBoundingClientRect();
         if (track.width === 0) return;
@@ -1348,8 +1299,6 @@ function setupEvents() {
         updateDashboard();
     };
     timelineSlider.addEventListener('click', jumpToPointer);
-    // In Chromium a click on a range input can also fire at the original
-    // position; ignore the synthetic click that follows a drag.
     timelineSlider.addEventListener('pointerup', (e) => {
         if (e.button !== 0) return;
         const track = timelineSlider.getBoundingClientRect();
@@ -1404,9 +1353,22 @@ function setupEvents() {
     document.getElementById('close-feed').addEventListener('click', () => setLivePanelOpen(false));
     setLivePanelOpen(true);
 
-    document.getElementById('open-notable-modal').addEventListener('click', () => {
+    document.getElementById('open-notable-modal').addEventListener('click', async () => {
         const modal = document.getElementById('notable-modal');
         const body = document.getElementById('notable-modal-body');
+        body.innerHTML = '<div style="font-size: 0.8rem; color: var(--text-secondary); padding: 1rem 0;">Loading notable organizations…</div>';
+        modal.classList.add('open');
+        lucide.createIcons();
+
+        // Load full notables list on demand (notables.json is fetched only here).
+        try {
+            const res = await fetch('notables.json?v=' + Date.now(), { cache: 'no-store' });
+            allNotable = res.ok ? await res.json() : [];
+        } catch (e) {
+            console.error("Failed to load notables", e);
+            allNotable = [];
+        }
+
         const { rdns, cloud, otherHosting } = categorizeNotable(allNotable);
         const sortedRdns = sortNotablesByCount(getVisibleNotables(rdns));
         const sortedCloud = sortNotablesByCount(getVisibleNotables(cloud));
@@ -1426,7 +1388,6 @@ function setupEvents() {
         }
         body.innerHTML = html;
         attachDrillDown(body);
-        modal.classList.add('open');
         lucide.createIcons();
     });
 
@@ -1437,14 +1398,8 @@ function setupEvents() {
     document.getElementById('open-paths-modal').addEventListener('click', () => {
         const modal = document.getElementById('paths-modal');
         const body = document.getElementById('paths-modal-body');
-
-        // Open the modal immediately so it never feels unresponsive. The full
-        // list can be ~2,500 rows; building all of that HTML synchronously
-        // blocked the main thread long enough to look like a dead button.
         modal.classList.add('open');
         body.innerHTML = '<div style="font-size: 0.8rem; color: var(--text-secondary); padding: 1rem 0;">Crunching path data…</div>';
-
-        // Defer the work past the paint so the modal is visible first.
         setTimeout(() => renderPathsModalBody(), 0);
     });
 
@@ -1459,14 +1414,14 @@ function setupEvents() {
         filteredSessions.forEach(s => {
             const c = s.geo.country_code || '??';
             if (!countries[c]) countries[c] = { name: s.geo.country || 'Unknown', total: 0, legit: 0, cloud: 0, hosting: 0, bot: 0, mal: 0, ips: new Set(), blockedIps: new Set() };
-            countries[c].total += s.req_count;
+            countries[c].total += s.req_count || 0;
             countries[c].ips.add(s.origin_ip);
             const ttype = getTrafficType(s);
-            if (ttype === 'malicious') countries[c].mal += s.req_count;
-            else if (ttype === 'bot') countries[c].bot += s.req_count;
-            else if (ttype === 'cloud') countries[c].cloud += s.req_count;
-            else if (ttype === 'hosting') countries[c].hosting += s.req_count;
-            else countries[c].legit += s.req_count;
+            if (ttype === 'malicious') countries[c].mal += s.req_count || 0;
+            else if (ttype === 'bot') countries[c].bot += s.req_count || 0;
+            else if (ttype === 'cloud') countries[c].cloud += s.req_count || 0;
+            else if (ttype === 'hosting') countries[c].hosting += s.req_count || 0;
+            else countries[c].legit += s.req_count || 0;
             if (BLOCKED_COUNTRIES.includes(c) || ttype === 'malicious') {
                 countries[c].blockedIps.add(s.origin_ip);
             }
@@ -1487,11 +1442,11 @@ function setupEvents() {
                 </div>
                 <div style="font-size: 0.7rem; color: var(--text-secondary); margin-bottom: 3px;">${blockedLabel}${e.ipCount} IPs</div>
                 <div style="display: flex; height: 6px; border-radius: 3px; overflow: hidden; background: rgba(255,255,255,0.05);">
-                    <div style="width: ${(e.legit/e.total*100)}%; background: #00f2ff;"></div>
-                    <div style="width: ${(e.cloud/e.total*100)}%; background: #a855f7;"></div>
-                    <div style="width: ${(e.hosting/e.total*100)}%; background: #22c55e;"></div>
-                    <div style="width: ${(e.bot/e.total*100)}%; background: #ffaa00;"></div>
-                    <div style="width: ${(e.mal/e.total*100)}%; background: #f43f5e;"></div>
+                    <div style="width: ${(e.legit / e.total * 100)}%; background: #00f2ff;"></div>
+                    <div style="width: ${(e.cloud / e.total * 100)}%; background: #a855f7;"></div>
+                    <div style="width: ${(e.hosting / e.total * 100)}%; background: #22c55e;"></div>
+                    <div style="width: ${(e.bot / e.total * 100)}%; background: #ffaa00;"></div>
+                    <div style="width: ${(e.mal / e.total * 100)}%; background: #f43f5e;"></div>
                 </div>
                 <div class="country-detail" style="display: none; margin-top: 0.5rem;"></div>
             </div>`;
@@ -1528,11 +1483,6 @@ function setupEvents() {
                 const code = row.dataset.code;
                 const countryIps = [...new Set(filteredSessions.filter(s => (s.geo.country_code || '??') === code).map(s => s.origin_ip))];
                 detail.innerHTML = renderIpDetailTable(countryIps);
-                if (!detail.innerHTML) {
-                    const code = row.dataset.code;
-                    const countryIps = [...new Set(filteredSessions.filter(s => (s.geo.country_code || '??') === code).map(s => s.origin_ip))];
-                    detail.innerHTML = renderIpDetailTable(countryIps);
-                }
                 detail.style.display = 'block';
             });
         });
@@ -1550,6 +1500,122 @@ function setupEvents() {
             if (e.target === modal) modal.classList.remove('open');
         });
     });
+}
+
+function updateMarkers() {
+    markers.forEach(m => map.removeLayer(m));
+    markers = [];
+
+    const MAX_MARKERS = 2000;
+    const nowTs = allSessions.length
+        ? Math.max(...allSessions.slice(0, Math.floor((allSessions.length - 1) *
+            ((parseInt(document.getElementById('timeline-slider').value, 10)) / 100)) + 1)
+            .map(s => getSessionTimestamp(s, 'last'))
+            .filter(ts => Number.isFinite(ts) && ts > 0))
+        : 0;
+    const windowMs = getPersistenceWindowMs();
+    const cutoff = (windowMs === Infinity || !nowTs) ? -Infinity : nowTs - windowMs;
+
+    const candidates = filteredSessions.filter(s => {
+        if (!s.geo || !s.geo.lat) return false;
+        if (windowMs === Infinity) return true;
+        const ts = getSessionTimestamp(s, 'last');
+        return Number.isFinite(ts) && ts >= cutoff;
+    });
+
+    candidates.sort((a, b) => getSessionTimestamp(b, 'last') - getSessionTimestamp(a, 'last'));
+    const toDraw = candidates.slice(0, MAX_MARKERS).reverse();
+
+    toDraw.forEach(s => {
+        const ttype = getTrafficType(s);
+        const color = TRAFFIC_COLORS[ttype];
+        const isBlocked = BLOCKED_COUNTRIES.includes(s.geo.country_code);
+        const blockedBadge = isBlocked ? '<span style="background: #f43f5e; color: #fff; padding: 1px 5px; border-radius: 3px; font-size: 0.65rem; font-weight: 700; letter-spacing: 0.05em; margin-left: 4px;">BLOCKED</span>' : '';
+
+        const popupContent = `
+            <div style="font-family: inherit; font-size: 0.8rem;">
+                <b style="color: var(--accent-color)">${s.origin_ip}</b>${blockedBadge}<br>
+                <span style="font-size: 0.7rem; opacity: 0.7;">Edge: ${s.edge_ip || s.origin_ip}</span><br>
+                <b>${s.geo.hostname || 'No RDNS'}</b><br>
+                ${s.geo.asn_name || ('AS' + (s.geo.asn || '?'))}<br>
+                ${s.geo.city || 'Unknown'}, ${s.geo.country}<br>
+                <div style="margin-top: 5px; border-top: 1px solid rgba(255,255,255,0.1); padding-top: 5px;">
+                    Intent: <span style="color: ${color}">${s.intent}</span><br>
+                    Hits: ${s.req_count} | Rate: ${s.req_rate} RPS
+                    ${s.is_malicious && s.tags && s.tags.length ? '<br><div style="margin-top:4px;">' + s.tags.map(t => `<span style="background:rgba(244,63,94,0.2);color:#f43f5e;padding:1px 4px;border-radius:2px;font-size:0.6rem;font-weight:600;margin-right:2px;">${t}</span>`).join('') + '</div>' : ''}
+                    ${s.is_malicious && s.path_summary && s.path_summary.length ? '<br><div style="font-family:monospace;font-size:0.6rem;color:#f43f5e;margin-top:3px;max-width:200px;">' + (s.path_summary || []).slice(0, 3).join('<br>') + ((s.path_summary || []).length > 3 ? '<br>+' + ((s.path_summary || []).length - 3) + ' more' : '') + '</div>' : ''}
+                </div>
+            </div>
+        `;
+
+        const marker = L.circleMarker([s.geo.lat, s.geo.lon], {
+            radius: Math.min(20, 5 + Math.sqrt(s.req_count)),
+            fillColor: color, color: color, weight: 1,
+            opacity: 0.8, fillOpacity: 0.4
+        }).bindPopup(popupContent);
+
+        marker.addTo(map);
+        markers.push(marker);
+    });
+}
+
+function updateChartsData(maxIdx) {
+    const legit = filteredSessions.filter(s => !s.geo.is_bot && !s.is_malicious && !s.geo.is_cloud && !s.geo.is_hosting).length;
+    const cloud = filteredSessions.filter(s => s.geo.is_cloud && !s.geo.is_bot && !s.is_malicious).length;
+    const hosting = filteredSessions.filter(s => s.geo.is_hosting && !s.geo.is_bot && !s.is_malicious).length;
+    const bots = filteredSessions.filter(s => s.geo.is_bot).length;
+    const malicious = filteredSessions.filter(s => s.is_malicious).length;
+
+    typeChart.data.labels = ['Legit', 'Cloud', 'Hosting', 'Bots', 'Malicious'];
+    typeChart.data.datasets[0].data = [legit, cloud, hosting, bots, malicious];
+    typeChart.data.datasets[0].backgroundColor = ['#00f2ff', '#a855f7', '#22c55e', '#ffaa00', '#f43f5e'];
+    typeChart.update();
+
+    const statusTotals = [0, 0, 0, 0];
+    filteredSessions.forEach((s) => {
+        if (s.status_counts) {
+            statusTotals[0] += Number(s.status_counts['2xx'] || 0);
+            statusTotals[1] += Number(s.status_counts['3xx'] || 0);
+            statusTotals[2] += Number(s.status_counts['4xx'] || 0);
+            statusTotals[3] += Number(s.status_counts['5xx'] || 0);
+            return;
+        }
+        if (s.is_malicious || isScannerTraffic(s)) {
+            statusTotals[2] += Number(s.req_count || 0);
+        } else {
+            statusTotals[0] += Number(s.req_count || 0);
+        }
+    });
+    statusChart.data.datasets[0].data = statusTotals;
+    statusChart.update();
+
+    const totalInWindow = Math.max(1, (typeof maxIdx === 'number' ? maxIdx + 1 : allSessions.length));
+    const bucketCount = Math.max(1, Math.min(30, totalInWindow));
+    const bucketSize = Math.max(1, Math.ceil(totalInWindow / bucketCount));
+    const requestData = new Array(bucketCount).fill(0);
+    const ipSets = Array.from({ length: bucketCount }, () => new Set());
+    const bucketTimeRanges = Array.from({ length: bucketCount }, () => ({ start: 0, end: 0 }));
+
+    for (let i = 0; i < totalInWindow; i++) {
+        const s = allSessions[i];
+        const bucketIdx = Math.min(bucketCount - 1, Math.floor(i / bucketSize));
+        const ts = getSessionTimestamp(s, 'last');
+
+        if (!bucketTimeRanges[bucketIdx].start || ts < bucketTimeRanges[bucketIdx].start) bucketTimeRanges[bucketIdx].start = ts;
+        if (ts > bucketTimeRanges[bucketIdx].end) bucketTimeRanges[bucketIdx].end = ts;
+
+        if (!sessionMatchesCurrentFilter(s)) continue;
+        requestData[bucketIdx] += Number(s.req_count || 0);
+        ipSets[bucketIdx].add(s.origin_ip);
+    }
+
+    const ipLineData = ipSets.map(set => set.size);
+    const labels = bucketTimeRanges.map(range => formatBucketLabel(range.end || range.start));
+
+    volumeChart.data.labels = labels;
+    volumeChart.data.datasets[0].data = requestData;
+    volumeChart.data.datasets[1].data = ipLineData;
+    volumeChart.update();
 }
 
 function clamp(value, min, max) {
